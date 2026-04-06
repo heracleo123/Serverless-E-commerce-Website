@@ -1,7 +1,9 @@
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, GetCommand, PutCommand } = require("@aws-sdk/lib-dynamodb");
+const { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand } = require("@aws-sdk/lib-dynamodb");
+const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const s3Client = new S3Client({});
 const ADULT_AGE_YEARS = 18;
 
 const headers = {
@@ -40,6 +42,34 @@ const normalizeBirthDate = (birthDate) => {
     return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : '';
 };
 
+const sanitizePublicName = (value) => String(value || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
+
+const resolveStoredPublicName = (...values) => {
+    for (const value of values) {
+        const nextValue = sanitizePublicName(value);
+        if (nextValue) {
+            return nextValue;
+        }
+    }
+
+    return '';
+};
+
+const normalizeUsername = (username) => {
+    const normalized = sanitizePublicName(username);
+    if (!normalized) {
+        return '';
+    }
+
+    if (normalized.length < 3 || normalized.length > 24) {
+        throw new Error('Username must be between 3 and 24 characters.');
+    }
+
+    return normalized;
+};
+
+const sanitizeFileName = (name) => String(name || 'profile-photo').replace(/[^a-zA-Z0-9._-]/g, '_');
+
 const validateAdultBirthDate = (birthDate) => {
     const normalized = normalizeBirthDate(birthDate);
     if (!normalized) {
@@ -75,6 +105,58 @@ const normalizeAddresses = (addresses) => {
         .slice(0, 5);
 };
 
+const ensureUniqueUsername = async (userId, username) => {
+    if (!username) {
+        return;
+    }
+
+    const result = await docClient.send(new ScanCommand({
+        TableName: process.env.USER_PROFILES_TABLE,
+        ProjectionExpression: 'userId, username'
+    }));
+
+    const conflict = (result.Items || []).find((item) => (
+        item.userId !== userId && String(item.username || '').trim().toLowerCase() === username
+    ));
+
+    if (conflict) {
+        throw new Error('That username is already taken.');
+    }
+};
+
+const uploadProfilePhoto = async (userId, photoFile) => {
+    if (!photoFile?.fileData || !process.env.S3_BUCKET || !process.env.CDN_URL) {
+        return '';
+    }
+
+    const match = String(photoFile.fileData || '').match(/^data:(.+);base64,(.+)$/);
+    const base64 = match ? match[2] : String(photoFile.fileData || '');
+    const fileType = photoFile.fileType || match?.[1] || 'image/jpeg';
+    const key = `profiles/${userId}-${Date.now()}-${sanitizeFileName(photoFile.fileName || 'profile-photo.jpg')}`;
+
+    await s3Client.send(new PutObjectCommand({
+        Bucket: process.env.S3_BUCKET,
+        Key: key,
+        Body: Buffer.from(base64, 'base64'),
+        ContentType: fileType,
+    }));
+
+    return `${process.env.CDN_URL}/${key}`;
+};
+
+const buildBaseProfile = (claims) => ({
+    userId: claims.sub,
+    email: claims.email || '',
+    username: '',
+    displayName: '',
+    photoUrl: '',
+    addresses: [],
+    defaultAddressId: null,
+    birthDate: '',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+});
+
 exports.handler = async (event) => {
     if (event.httpMethod === 'OPTIONS') {
         return { statusCode: 200, headers, body: '' };
@@ -89,13 +171,7 @@ exports.handler = async (event) => {
         };
     }
 
-    const baseProfile = {
-        userId: claims.sub,
-        email: claims.email || '',
-        addresses: [],
-        defaultAddressId: null,
-        birthDate: ''
-    };
+    const baseProfile = buildBaseProfile(claims);
 
     try {
         if (event.httpMethod === 'GET') {
@@ -110,6 +186,9 @@ exports.handler = async (event) => {
                 body: JSON.stringify({
                     ...baseProfile,
                     ...(result.Item || {}),
+                    username: resolveStoredPublicName(result.Item?.username, result.Item?.displayName),
+                    displayName: resolveStoredPublicName(result.Item?.username, result.Item?.displayName),
+                    photoUrl: String(result.Item?.photoUrl || '').trim(),
                     birthDate: normalizeBirthDate(result.Item?.birthDate)
                 })
             };
@@ -117,16 +196,34 @@ exports.handler = async (event) => {
 
         if (event.httpMethod === 'PUT') {
             const payload = JSON.parse(event.body || '{}');
+            const existingProfileResult = await docClient.send(new GetCommand({
+                TableName: process.env.USER_PROFILES_TABLE,
+                Key: { userId: claims.sub }
+            }));
+
+            const existingProfile = existingProfileResult.Item || {};
             const addresses = normalizeAddresses(payload.addresses);
             const defaultAddressId = addresses.some((address) => address.id === payload.defaultAddressId)
                 ? payload.defaultAddressId
                 : addresses[0]?.id || null;
+            const username = normalizeUsername(payload.username ?? payload.displayName ?? existingProfile.username ?? existingProfile.displayName);
+
+            await ensureUniqueUsername(claims.sub, username);
+
+            const uploadedPhotoUrl = payload.photoFile
+                ? await uploadProfilePhoto(claims.sub, payload.photoFile)
+                : '';
 
             const profile = {
                 ...baseProfile,
+                ...existingProfile,
                 addresses,
                 defaultAddressId,
+                username,
+                displayName: username,
+                photoUrl: payload.removePhoto ? '' : (uploadedPhotoUrl || existingProfile.photoUrl || ''),
                 birthDate: validateAdultBirthDate(payload.birthDate),
+                createdAt: existingProfile.createdAt || baseProfile.createdAt,
                 updatedAt: new Date().toISOString()
             };
 
@@ -148,7 +245,7 @@ exports.handler = async (event) => {
         return {
             statusCode: 500,
             headers,
-            body: JSON.stringify({ message: 'Unable to process profile.' })
+            body: JSON.stringify({ message: error.message || 'Unable to process profile.' })
         };
     }
 };

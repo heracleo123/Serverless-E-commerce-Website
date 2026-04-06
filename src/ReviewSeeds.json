@@ -1,0 +1,82 @@
+{
+  "reviews": [
+    {
+      "productId": "LAP-001",
+      "userId": "seed-user-ava",
+      "rating": 5,
+      "title": "Perfect for school and work",
+      "review": "Battery life has been excellent and it stays cool even after a full day of classes, docs, and video calls.",
+      "displayName": "Ava Chen",
+      "username": "avachn",
+      "photoUrl": "",
+      "verifiedPurchase": true,
+      "createdAt": "2026-03-02T15:00:00.000Z",
+      "updatedAt": "2026-03-02T15:00:00.000Z"
+    },
+    {
+      "productId": "LAP-002",
+      "userId": "seed-user-miguel",
+      "rating": 4,
+      "title": "Fast and clean build quality",
+      "review": "Very sharp screen and the chassis feels premium. I wish the webcam was a bit better, but performance has been great.",
+      "displayName": "Miguel Torres",
+      "username": "mtorres",
+      "photoUrl": "",
+      "verifiedPurchase": true,
+      "createdAt": "2026-03-06T19:30:00.000Z",
+      "updatedAt": "2026-03-06T19:30:00.000Z"
+    },
+    {
+      "productId": "ACS-006",
+      "userId": "seed-user-nina",
+      "rating": 5,
+      "title": "Worth it for everyday use",
+      "review": "Quiet clicks, super comfortable, and switching between laptop and desktop has been smooth.",
+      "displayName": "Nina Patel",
+      "username": "nina.codes",
+      "photoUrl": "",
+      "verifiedPurchase": true,
+      "createdAt": "2026-03-12T12:10:00.000Z",
+      "updatedAt": "2026-03-12T12:10:00.000Z"
+    },
+    {
+      "productId": "MP-001",
+      "userId": "seed-user-david",
+      "rating": 5,
+      "title": "Camera is unreal",
+      "review": "Low-light photos came out much better than my old phone and the battery still had plenty left at the end of the day.",
+      "displayName": "David Kim",
+      "username": "dkshots",
+      "photoUrl": "",
+      "verifiedPurchase": true,
+      "createdAt": "2026-03-20T09:45:00.000Z",
+      "updatedAt": "2026-03-20T09:45:00.000Z"
+    },
+    {
+      "productId": "ACS-001",
+      "userId": "seed-user-sarah",
+      "rating": 4,
+      "title": "Great for travel",
+      "review": "The stand is more useful than I expected and the magnetic hold feels secure inside my bag.",
+      "displayName": "Sarah Lopez",
+      "username": "slopez",
+      "photoUrl": "",
+      "verifiedPurchase": true,
+      "createdAt": "2026-03-24T18:20:00.000Z",
+      "updatedAt": "2026-03-24T18:20:00.000Z"
+    },
+    {
+      "productId": "MP-002",
+      "userId": "seed-user-jordan",
+      "rating": 5,
+      "title": "Premium and reliable",
+      "review": "Setup was easy, video recording is excellent, and the phone feels very polished overall.",
+      "displayName": "Jordan Singh",
+      "username": "jordansg",
+      "photoUrl": "",
+      "verifiedPurchase": true,
+      "createdAt": "2026-03-29T21:05:00.000Z",
+      "updatedAt": "2026-03-29T21:05:00.000Z"
+    }
+  ]
+}

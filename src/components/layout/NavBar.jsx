@@ -114,15 +114,23 @@ export default function NavBar({ cartCount, authUser, onSignOut, onOpenCart, onO
           </button>
         )}
 
-        {/* Cart */}
-        <button onClick={onOpenCart} className="p-3 bg-zinc-100 rounded-full relative hover:bg-zinc-200">
-          <ShoppingCart size={20} className="text-zinc-900" />
-          {cartCount > 0 && (
-            <span className="absolute -top-1 -right-1 bg-rose-600 text-white text-[9px] w-5 h-5 rounded-full flex items-center justify-center border-2 border-white font-black">
-              {cartCount}
-            </span>
-          )}
-        </button>
+        {isAdmin ? (
+          <Link
+            to="/admin"
+            className="inline-flex items-center gap-2 rounded-full bg-zinc-900 px-5 py-3 text-[10px] font-black uppercase tracking-[0.18em] text-white transition hover:bg-rose-600"
+          >
+            <LayoutDashboard size={18} /> Admin Dashboard
+          </Link>
+        ) : (
+          <button onClick={onOpenCart} className="p-3 bg-zinc-100 rounded-full relative hover:bg-zinc-200">
+            <ShoppingCart size={20} className="text-zinc-900" />
+            {cartCount > 0 && (
+              <span className="absolute -top-1 -right-1 bg-rose-600 text-white text-[9px] w-5 h-5 rounded-full flex items-center justify-center border-2 border-white font-black">
+                {cartCount}
+              </span>
+            )}
+          </button>
+        )}
       </div>
     </nav>
   );

@@ -12,7 +12,7 @@ export default function OrdersDrawer({ isOpen, onClose, orders = [], isLoading =
   const normalizedOrders = useMemo(
     () => orders.map((order) => ({
       ...order,
-      trackingNumber: order.trackingNumber || `ET-${String(order.orderId || 'ORDER').replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(-12).padStart(12, '0')}`
+      trackingNumber: order.trackingNumber || ''
     })),
     [orders]
   );
@@ -97,9 +97,13 @@ export default function OrdersDrawer({ isOpen, onClose, orders = [], isLoading =
                 <div className="rounded-2xl bg-zinc-50 p-4 mb-4 border border-zinc-100">
                   <div className="flex items-center gap-2 text-zinc-500 mb-3">
                     <Truck size={14} />
-                    <span className="text-[10px] font-black uppercase tracking-[0.18em]">Tracking Number</span>
+                    <span className="text-[10px] font-black uppercase tracking-[0.18em]">Tracking</span>
                   </div>
-                  <p className="text-sm font-black tracking-[0.12em] text-zinc-900">{order.trackingNumber}</p>
+                  {order.trackingNumber ? (
+                    <p className="text-sm font-black tracking-[0.12em] text-zinc-900">{order.trackingNumber}</p>
+                  ) : (
+                    <p className="text-xs font-medium text-zinc-500">Tracking will appear here once your order ships.</p>
+                  )}
                 </div>
                 
                 {/* 6. NESTED ITEM ITERATION
@@ -132,7 +136,7 @@ export default function OrdersDrawer({ isOpen, onClose, orders = [], isLoading =
                     <Mail size={14} />
                     <span className="text-[10px] font-black uppercase tracking-[0.18em]">Resend Receipt</span>
                   </div>
-                  <p className="mt-2 text-[11px] text-zinc-500">Send the order confirmation, receipt, order number, and tracking number to another email.</p>
+                  <p className="mt-2 text-[11px] text-zinc-500">Send the order confirmation, receipt, order number, and any shipped tracking details to another email.</p>
                   <div className="mt-3 flex gap-2">
                     <input
                       type="email"

@@ -1,42 +1,70 @@
-const { DynamoDBClient, ScanCommand } = require("@aws-sdk/client-dynamodb");
-const { unmarshall } = require("@aws-sdk/util-dynamodb");
+const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+const { DynamoDBDocumentClient, ScanCommand } = require("@aws-sdk/lib-dynamodb");
 
-const client = new DynamoDBClient({});
+const client = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
-exports.handler = async (event) => {
+const headers = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
+};
+
+const buildReviewSummaryByProduct = (reviews) => {
+    const summaryMap = new Map();
+
+    for (const review of reviews) {
+        const productId = String(review.productId || '').trim();
+        const rating = Number(review.rating || 0);
+        if (!productId || rating <= 0) {
+            continue;
+        }
+
+        const current = summaryMap.get(productId) || { totalRating: 0, reviewCount: 0 };
+        current.totalRating += rating;
+        current.reviewCount += 1;
+        summaryMap.set(productId, current);
+    }
+
+    return summaryMap;
+};
+
+exports.handler = async () => {
     try {
-        /* --- 1. THE DATABASE SCAN --- */
-        // ScanCommand reads every single item
-        const command = new ScanCommand({ TableName: "Products" });
-        const { Items } = await client.send(command);
-        
-        /* --- 2. DATA UNMARSHALLING --- */
-        // DynamoDB stores data in a unique format (e.g., { "price": { "N": "1200" } }).
-        // 'unmarshall' converts that into standard JSON (e.g., { "price": 1200 }).
-        // We map through the array to clean up every item returned.
-        const unmarshalledItems = (Items || []).map(item => unmarshall(item));
+        const [productsResult, reviewsResult] = await Promise.all([
+            client.send(new ScanCommand({ TableName: process.env.PRODUCTS_TABLE || "Products" })),
+            process.env.REVIEWS_TABLE
+                ? client.send(new ScanCommand({ TableName: process.env.REVIEWS_TABLE }))
+                : Promise.resolve({ Items: [] })
+        ]);
 
-        /* --- 3. THE RESPONSE (WITH CORS) --- */
+        const reviewSummaryByProduct = buildReviewSummaryByProduct(reviewsResult.Items || []);
+        const products = (productsResult.Items || []).map((product) => {
+            const reviewSummary = reviewSummaryByProduct.get(product.productId) || { totalRating: 0, reviewCount: 0 };
+            const reviewCount = reviewSummary.reviewCount;
+            const averageRating = reviewCount > 0 ? Math.round((reviewSummary.totalRating / reviewCount) * 10) / 10 : 0;
+
+            return {
+                ...product,
+                price: Number(product.price || 0),
+                stock: Number(product.stock || 0),
+                images: Array.isArray(product.images) && product.images.length > 0
+                    ? product.images.filter(Boolean).slice(0, 5)
+                    : [product.imageUrl].filter(Boolean),
+                reviewCount,
+                averageRating,
+            };
+        });
+
         return {
             statusCode: 200,
-            headers: {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
-            },
-            // The body must be a string, so we stringify our clean JSON array.
-            body: JSON.stringify(unmarshalledItems), 
+            headers,
+            body: JSON.stringify(products),
         };
     } catch (err) {
-        /* --- 4. ERROR HANDLING --- */
-        console.error("Database Fetch Error:", err); // Logs the error to CloudWatch
+        console.error("Database Fetch Error:", err);
         return {
             statusCode: 500,
-            headers: {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
-            },
+            headers,
             body: JSON.stringify({ error: err.message }),
         };
     }

@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Calendar, Edit, Home, Package, Plus, Shield, ShieldOff, Tag, Trash2, Truck, Users } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Calendar, Edit, Eye, Home, Package, Plus, Shield, ShieldOff, Tag, Trash2, Truck, Users } from 'lucide-react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { fetchAuthSession } from 'aws-amplify/auth';
 import { APP_CONFIG, CATEGORIES } from '../../constants/appConstants';
+import AdminUserModal from './AdminUserModal';
 import ProductFormModal from './ProductFormModal';
 import Toast from './Toast';
 
@@ -18,6 +19,9 @@ const ADMIN_TABS = [
   { key: 'promos', label: 'Promos', icon: Tag },
 ];
 
+const TRACKING_STATUSES = new Set(['SHIPPED', 'DELIVERED']);
+const ORDER_STATUS_FILTERS = ['ALL', 'PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
+
 const DEFAULT_PROMO_FORM = {
   code: '',
   description: '',
@@ -30,6 +34,8 @@ const DEFAULT_PROMO_FORM = {
 };
 
 export default function AdminDashboard() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('inventory');
   const [products, setProducts] = useState([]);
   const [users, setUsers] = useState([]);
@@ -43,6 +49,13 @@ export default function AdminDashboard() {
   const [isBusy, setIsBusy] = useState(false);
   const [toast, setToast] = useState(null);
   const [currentAdminEmail, setCurrentAdminEmail] = useState('');
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [selectedUserDetail, setSelectedUserDetail] = useState(null);
+  const [isUserModalOpen, setIsUserModalOpen] = useState(false);
+  const [isLoadingUserDetail, setIsLoadingUserDetail] = useState(false);
+  const [isSavingUserDetail, setIsSavingUserDetail] = useState(false);
+  const [hasLoadedProducts, setHasLoadedProducts] = useState(false);
+  const [selectedOrderStatus, setSelectedOrderStatus] = useState('ALL');
 
   const categoryOptions = useMemo(() => {
     const categories = Array.from(new Set(products.map((product) => product.category).filter(Boolean))).sort();
@@ -56,6 +69,12 @@ export default function AdminDashboard() {
       ? products
       : products.filter((product) => product.category === selectedCategory)
   ), [products, selectedCategory]);
+
+  const filteredOrders = useMemo(() => (
+    selectedOrderStatus === 'ALL'
+      ? orders
+      : orders.filter((order) => String(order.status || '').toUpperCase() === selectedOrderStatus)
+  ), [orders, selectedOrderStatus]);
 
   const getToken = useCallback(async () => {
     const session = await fetchAuthSession();
@@ -72,14 +91,19 @@ export default function AdminDashboard() {
   const showToast = (message, type = 'success') => setToast({ message, type });
 
   const fetchProducts = useCallback(async () => {
-    const response = await fetch(`${APP_CONFIG.API_URL}/products`);
-    const data = await response.json();
-    setProducts(Array.isArray(data) ? data : []);
+    try {
+      const response = await fetch(`${APP_CONFIG.API_URL}/products`);
+      const data = await response.json();
+      setProducts(Array.isArray(data) ? data : []);
+    } finally {
+      setHasLoadedProducts(true);
+    }
   }, []);
 
-  const fetchAdminEntity = useCallback(async (entity) => {
+  const fetchAdminEntity = useCallback(async (entity, params = {}) => {
     const token = await getToken();
-    const response = await fetch(`${APP_CONFIG.API_URL}/admin-data?entity=${encodeURIComponent(entity)}`, {
+    const query = new URLSearchParams({ entity, ...params });
+    const response = await fetch(`${APP_CONFIG.API_URL}/admin-data?${query.toString()}`, {
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
@@ -131,6 +155,29 @@ export default function AdminDashboard() {
 
     loadActiveTab();
   }, [activeTab, fetchAdminEntity]);
+
+  useEffect(() => {
+    if (!hasLoadedProducts) {
+      return;
+    }
+
+    const requestedProductId = new URLSearchParams(location.search).get('editProduct');
+    if (!requestedProductId) {
+      return;
+    }
+
+    const requestedProduct = products.find((product) => product.productId === requestedProductId);
+    setActiveTab('inventory');
+
+    if (requestedProduct) {
+      setSelectedProduct(requestedProduct);
+      setIsModalOpen(true);
+    } else {
+      showToast('Requested product was not found in inventory.', 'error');
+    }
+
+    navigate('/admin', { replace: true });
+  }, [hasLoadedProducts, location.search, navigate, products]);
 
   const postAdminAction = async (payload) => {
     const token = await getToken();
@@ -203,8 +250,10 @@ export default function AdminDashboard() {
         headers: { Authorization: `Bearer ${token}` },
       });
 
+      const data = await response.json().catch(() => ({}));
+
       if (!response.ok) {
-        throw new Error('Server denied deletion.');
+        throw new Error(data.message || data.error || 'Server denied deletion.');
       }
 
       setProducts((current) => current.filter((product) => product.productId !== productId));
@@ -303,10 +352,58 @@ export default function AdminDashboard() {
       setOrders((current) => current.map((entry) => (
         entry.orderId === updatedOrder.orderId && entry.createdAt === updatedOrder.createdAt ? updatedOrder : entry
       )));
+      setSelectedUserDetail((current) => {
+        if (!current?.orders) {
+          return current;
+        }
+
+        return {
+          ...current,
+          orders: current.orders.map((entry) => (
+            entry.orderId === updatedOrder.orderId && entry.createdAt === updatedOrder.createdAt ? updatedOrder : entry
+          )),
+        };
+      });
       showToast(`Order ${updatedOrder.orderId} updated.`);
     } catch (error) {
       console.error('Update order failed:', error);
       showToast(error.message || 'Unable to update order.', 'error');
+    }
+  };
+
+  const handleOpenUserDetail = async (user) => {
+    try {
+      setSelectedUser(user);
+      setSelectedUserDetail(null);
+      setIsUserModalOpen(true);
+      setIsLoadingUserDetail(true);
+      setSelectedUserDetail(await fetchAdminEntity('user-detail', { userId: user.sub }));
+    } catch (error) {
+      console.error('Load user detail failed:', error);
+      showToast(error.message || 'Unable to load customer profile.', 'error');
+    } finally {
+      setIsLoadingUserDetail(false);
+    }
+  };
+
+  const handleSaveUserProfile = async (profile) => {
+    try {
+      setIsSavingUserDetail(true);
+      const nextDetail = await postAdminAction({
+        entity: 'users',
+        action: 'save-profile',
+        userId: selectedUser?.sub,
+        profile,
+      });
+
+      setSelectedUserDetail(nextDetail);
+      setUsers(await fetchAdminEntity('users'));
+      showToast('Customer profile updated.');
+    } catch (error) {
+      console.error('Save user detail failed:', error);
+      showToast(error.message || 'Unable to save customer profile.', 'error');
+    } finally {
+      setIsSavingUserDetail(false);
     }
   };
 
@@ -357,6 +454,18 @@ export default function AdminDashboard() {
               <button onClick={handleOpenAdd} className="flex items-center gap-2 rounded-2xl bg-zinc-900 px-6 py-4 text-xs font-black uppercase tracking-[0.2em] text-white transition hover:bg-rose-600">
                 <Plus size={16} /> Add Product
               </button>
+            </div>
+          ) : activeTab === 'orders' ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <select
+                value={selectedOrderStatus}
+                onChange={(event) => setSelectedOrderStatus(event.target.value)}
+                className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 outline-none"
+              >
+                {ORDER_STATUS_FILTERS.map((status) => (
+                  <option key={status} value={status}>{status === 'ALL' ? 'All statuses' : status}</option>
+                ))}
+              </select>
             </div>
           ) : null}
         </div>
@@ -481,21 +590,38 @@ export default function AdminDashboard() {
                 <div key={user.username} className="flex flex-wrap items-center justify-between gap-4 rounded-3xl border border-zinc-100 bg-zinc-50 p-5">
                   <div>
                     <p className="text-sm font-black text-zinc-900">{user.email || user.username}</p>
+                    {user.profile?.displayName || user.profile?.username ? (
+                      <p className="mt-1 text-sm font-medium text-zinc-500">{user.profile?.displayName || user.profile?.username}</p>
+                    ) : null}
                     <p className="mt-1 text-[10px] font-black uppercase tracking-[0.18em] text-zinc-400">{user.status} • {user.enabled ? 'Enabled' : 'Disabled'}</p>
+                    <div className="mt-2 flex flex-wrap gap-3 text-[10px] font-black uppercase tracking-[0.18em] text-zinc-400">
+                      <span>{user.orderCount || 0} orders</span>
+                      <span>{formatCurrency(user.lifetimeSpend || 0)} lifetime spend</span>
+                      <span>{user.profile?.addressCount || 0} addresses</span>
+                    </div>
                     <div className="mt-2 flex flex-wrap gap-2">
                       {(user.groups || []).map((group) => <span key={group} className="rounded-full bg-zinc-200 px-3 py-1 text-[10px] font-black uppercase tracking-tight text-zinc-700">{group}</span>)}
                       {user.isSuperAdmin ? <span className="rounded-full bg-rose-100 px-3 py-1 text-[10px] font-black uppercase tracking-tight text-rose-700">Superadmin</span> : null}
                     </div>
                   </div>
-                  {isSuperAdmin && !user.isSuperAdmin ? (
+                  <div className="flex flex-wrap items-center gap-3">
                     <button
                       type="button"
-                      onClick={() => handleToggleAdmin(user.username, !user.isAdmin)}
-                      className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-[10px] font-black uppercase tracking-[0.18em] text-white transition hover:bg-rose-600"
+                      onClick={() => handleOpenUserDetail(user)}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 px-4 py-3 text-[10px] font-black uppercase tracking-[0.18em] text-zinc-700 transition hover:border-rose-300 hover:text-rose-600"
                     >
-                      {user.isAdmin ? <ShieldOff size={14} /> : <Shield size={14} />} {user.isAdmin ? 'Undo Admin Access' : 'Promote To Admin'}
+                      <Eye size={14} /> View Profile
                     </button>
-                  ) : null}
+                    {isSuperAdmin && !user.isSuperAdmin ? (
+                      <button
+                        type="button"
+                        onClick={() => handleToggleAdmin(user.username, !user.isAdmin)}
+                        className="inline-flex items-center gap-2 rounded-2xl bg-zinc-900 px-4 py-3 text-[10px] font-black uppercase tracking-[0.18em] text-white transition hover:bg-rose-600"
+                      >
+                        {user.isAdmin ? <ShieldOff size={14} /> : <Shield size={14} />} {user.isAdmin ? 'Undo Admin Access' : 'Promote To Admin'}
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               ))}
             </div>
@@ -504,8 +630,9 @@ export default function AdminDashboard() {
 
         {activeTab === 'orders' ? (
           <div className="space-y-5">
-            {orders.length === 0 ? <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 text-sm font-medium text-zinc-500 shadow-xl">No pending orders right now.</div> : null}
-            {orders.map((order) => (
+            {orders.length === 0 ? <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 text-sm font-medium text-zinc-500 shadow-xl">No managed orders yet.</div> : null}
+            {orders.length > 0 && filteredOrders.length === 0 ? <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 text-sm font-medium text-zinc-500 shadow-xl">No orders match that status filter.</div> : null}
+            {filteredOrders.map((order) => (
               <OrderCard key={`${order.orderId}:${order.createdAt}`} order={order} onSave={handleOrderStatusChange} />
             ))}
           </div>
@@ -513,6 +640,19 @@ export default function AdminDashboard() {
       </main>
 
       <ProductFormModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} onSave={handleSaveProduct} product={selectedProduct} />
+      <AdminUserModal
+        isOpen={isUserModalOpen}
+        user={selectedUser}
+        detail={selectedUserDetail}
+        isLoading={isLoadingUserDetail}
+        isSaving={isSavingUserDetail}
+        onClose={() => {
+          setIsUserModalOpen(false);
+          setSelectedUser(null);
+          setSelectedUserDetail(null);
+        }}
+        onSave={handleSaveUserProfile}
+      />
       {toast ? <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} /> : null}
     </div>
   );
@@ -521,6 +661,22 @@ export default function AdminDashboard() {
 function OrderCard({ order, onSave }) {
   const [status, setStatus] = useState(order.status || 'PENDING');
   const [trackingNumber, setTrackingNumber] = useState(order.trackingNumber || '');
+  const trackingEnabled = TRACKING_STATUSES.has(status);
+  const refundReference = order.refundReference || order.refundId || '';
+
+  useEffect(() => {
+    setStatus(order.status || 'PENDING');
+  }, [order.status]);
+
+  useEffect(() => {
+    setTrackingNumber(order.trackingNumber || '');
+  }, [order.trackingNumber]);
+
+  useEffect(() => {
+    if (!trackingEnabled) {
+      setTrackingNumber('');
+    }
+  }, [trackingEnabled]);
 
   return (
     <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-xl">
@@ -535,6 +691,20 @@ function OrderCard({ order, onSave }) {
 
       <div className="mt-5 grid gap-4 lg:grid-cols-[1fr_0.7fr]">
         <div className="rounded-3xl border border-zinc-100 bg-zinc-50 p-5">
+          <div className="grid gap-3 rounded-2xl border border-zinc-200 bg-white p-4 sm:grid-cols-2">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Order Number</p>
+              <p className="mt-2 text-sm font-black text-zinc-900">{order.orderNumber || order.orderId}</p>
+            </div>
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Tracking Number</p>
+              <p className="mt-2 text-sm font-black text-zinc-900">{order.trackingNumber || 'Not available yet'}</p>
+            </div>
+            <div className="sm:col-span-2">
+              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Refund Reference</p>
+              <p className="mt-2 text-sm font-black text-zinc-900">{refundReference || 'Not refunded'}</p>
+            </div>
+          </div>
           <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Items</p>
           <div className="mt-3 space-y-2">
             {(order.items || []).map((item, index) => (
@@ -556,7 +726,7 @@ function OrderCard({ order, onSave }) {
               <option value="DELIVERED">Delivered</option>
               <option value="CANCELLED">Cancelled</option>
             </select>
-            <input value={trackingNumber} onChange={(event) => setTrackingNumber(event.target.value)} placeholder="Tracking number" className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm font-medium outline-none" />
+            <input value={trackingNumber} onChange={(event) => setTrackingNumber(event.target.value)} placeholder={trackingEnabled ? 'Tracking number' : 'Tracking unlocks once shipped'} disabled={!trackingEnabled} className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm font-medium outline-none disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400" />
             <button onClick={() => onSave(order, { status, trackingNumber })} className="w-full rounded-2xl bg-zinc-900 px-4 py-4 text-[10px] font-black uppercase tracking-[0.18em] text-white transition hover:bg-rose-600">Save Status And Email Customer</button>
           </div>
         </div>

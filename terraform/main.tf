@@ -4,10 +4,12 @@ locals {
     get_orders      = "GetOrders"
     process_order   = "ProcessOrders"
     stripe_webhook  = "StripeWebhook"
+    order_fulfillment_processor = "OrderFulfillmentProcessor"
     product_manager = "ProductManager"
     admin_manager   = "AdminManager"
     promo_lookup    = "PromoLookup"
     user_profile    = "UserProfile"
+    reviews         = "Reviews"
   }
 }
 
@@ -104,6 +106,60 @@ resource "aws_dynamodb_table" "user_profiles" {
   }
 }
 
+resource "aws_dynamodb_table" "product_reviews" {
+  name         = "ProductReviews"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "productId"
+  range_key    = "userId"
+
+  attribute {
+    name = "productId"
+    type = "S"
+  }
+
+  attribute {
+    name = "userId"
+    type = "S"
+  }
+
+  ttl {
+    enabled = false
+  }
+}
+
+resource "aws_sqs_queue" "order_events_dlq" {
+  name                        = "electrotech-order-events-dlq.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = false
+  message_retention_seconds   = 1209600
+}
+
+resource "aws_sqs_queue" "order_events" {
+  name                        = "electrotech-order-events.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = false
+  visibility_timeout_seconds  = 180
+  message_retention_seconds   = 345600
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.order_events_dlq.arn
+    maxReceiveCount     = 5
+  })
+}
+
+resource "null_resource" "seed_reviews" {
+  depends_on = [aws_dynamodb_table.product_reviews, null_resource.seed_products]
+
+  triggers = {
+    reviews_file = filemd5("${abspath(path.module)}/../src/ReviewSeeds.json")
+    seed_script  = filemd5("${abspath(path.module)}/../scripts/seed-reviews.js")
+  }
+
+  provisioner "local-exec" {
+    command = "node ${abspath(path.module)}/../scripts/seed-reviews.js --table ${aws_dynamodb_table.product_reviews.name} --file ${abspath(path.module)}/../src/ReviewSeeds.json --region ${var.aws_region}"
+  }
+}
+
 resource "aws_iam_role" "lambda_exec" {
   name = "capstone-lambda-exec"
 
@@ -146,10 +202,12 @@ resource "aws_iam_role_policy" "lambda_policy" {
       {
         Effect = "Allow"
         Action = [
+          "dynamodb:BatchGetItem",
           "dynamodb:Query",
           "dynamodb:GetItem",
           "dynamodb:Scan",
           "dynamodb:PutItem",
+          "dynamodb:TransactWriteItems",
           "dynamodb:UpdateItem",
           "dynamodb:DeleteItem"
         ]
@@ -158,6 +216,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
           aws_dynamodb_table.orders.arn,
           aws_dynamodb_table.promo_codes.arn,
           aws_dynamodb_table.user_profiles.arn,
+          aws_dynamodb_table.product_reviews.arn,
           "${aws_dynamodb_table.orders.arn}/index/*"
         ]
       },
@@ -192,6 +251,21 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "sns:Publish"
         ]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:SendMessage",
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:ChangeMessageVisibility",
+          "sqs:GetQueueAttributes",
+          "sqs:GetQueueUrl"
+        ]
+        Resource = [
+          aws_sqs_queue.order_events.arn,
+          aws_sqs_queue.order_events_dlq.arn
+        ]
       }
     ]
   })
@@ -475,6 +549,7 @@ resource "aws_lambda_function" "functions" {
   handler          = "index.handler"
   runtime          = "nodejs22.x"
   role             = aws_iam_role.lambda_exec.arn
+  timeout          = each.key == "order_fulfillment_processor" ? 30 : 3
 
   tracing_config {
     mode = "Active"
@@ -487,6 +562,7 @@ resource "aws_lambda_function" "functions" {
         ORDERS_TABLE   = aws_dynamodb_table.orders.name
         PROMO_CODES_TABLE  = aws_dynamodb_table.promo_codes.name
         USER_PROFILES_TABLE = aws_dynamodb_table.user_profiles.name
+        REVIEWS_TABLE  = aws_dynamodb_table.product_reviews.name
         FRONTEND_URL   = "https://${aws_cloudfront_distribution.frontend.domain_name}"
         CDN_URL        = "https://${aws_cloudfront_distribution.frontend.domain_name}"
         S3_BUCKET      = aws_s3_bucket.frontend.bucket
@@ -499,7 +575,10 @@ resource "aws_lambda_function" "functions" {
       each.key == "get_products" ? {} : {},
       each.key == "get_orders" ? {} : {},
       each.key == "process_order" ? {} : {},
-      each.key == "stripe_webhook" ? {} : {},
+      each.key == "stripe_webhook" ? {
+        ORDER_EVENTS_QUEUE_URL = aws_sqs_queue.order_events.id
+      } : {},
+      each.key == "order_fulfillment_processor" ? {} : {},
       each.key == "admin_manager" ? {} : {},
       each.key == "promo_lookup" ? {} : {},
       each.key == "user_profile" ? {} : {}
@@ -507,6 +586,13 @@ resource "aws_lambda_function" "functions" {
   }
 
   depends_on = [aws_iam_role_policy.lambda_policy, aws_ses_email_identity.from_email]
+}
+
+resource "aws_lambda_event_source_mapping" "order_events" {
+  event_source_arn = aws_sqs_queue.order_events.arn
+  function_name    = aws_lambda_function.functions["order_fulfillment_processor"].arn
+  batch_size       = 1
+  enabled          = true
 }
 
 resource "aws_api_gateway_rest_api" "capstone_api" {
@@ -554,6 +640,12 @@ resource "aws_api_gateway_resource" "promos" {
   rest_api_id = aws_api_gateway_rest_api.capstone_api.id
   parent_id   = aws_api_gateway_rest_api.capstone_api.root_resource_id
   path_part   = "promos"
+}
+
+resource "aws_api_gateway_resource" "reviews" {
+  rest_api_id = aws_api_gateway_rest_api.capstone_api.id
+  parent_id   = aws_api_gateway_rest_api.capstone_api.root_resource_id
+  path_part   = "reviews"
 }
 
 resource "aws_api_gateway_method" "products_get" {
@@ -770,6 +862,39 @@ resource "aws_api_gateway_integration" "promos_get" {
   uri                     = aws_lambda_function.functions["promo_lookup"].invoke_arn
 }
 
+resource "aws_api_gateway_method" "reviews_get" {
+  rest_api_id   = aws_api_gateway_rest_api.capstone_api.id
+  resource_id   = aws_api_gateway_resource.reviews.id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "reviews_get" {
+  rest_api_id             = aws_api_gateway_rest_api.capstone_api.id
+  resource_id             = aws_api_gateway_resource.reviews.id
+  http_method             = aws_api_gateway_method.reviews_get.http_method
+  type                    = "AWS_PROXY"
+  integration_http_method = "POST"
+  uri                     = aws_lambda_function.functions["reviews"].invoke_arn
+}
+
+resource "aws_api_gateway_method" "reviews_post" {
+  rest_api_id   = aws_api_gateway_rest_api.capstone_api.id
+  resource_id   = aws_api_gateway_resource.reviews.id
+  http_method   = "POST"
+  authorization = "COGNITO_USER_POOLS"
+  authorizer_id = aws_api_gateway_authorizer.cognito.id
+}
+
+resource "aws_api_gateway_integration" "reviews_post" {
+  rest_api_id             = aws_api_gateway_rest_api.capstone_api.id
+  resource_id             = aws_api_gateway_resource.reviews.id
+  http_method             = aws_api_gateway_method.reviews_post.http_method
+  type                    = "AWS_PROXY"
+  integration_http_method = "POST"
+  uri                     = aws_lambda_function.functions["reviews"].invoke_arn
+}
+
 # ProductManager Routes: POST /products (create), PUT /products/{productId} (update), DELETE /products/{productId} (delete)
 resource "aws_api_gateway_resource" "products_id" {
   rest_api_id = aws_api_gateway_rest_api.capstone_api.id
@@ -826,6 +951,56 @@ resource "aws_api_gateway_integration" "products_delete" {
   type        = "AWS_PROXY"
   integration_http_method = "POST"
   uri         = aws_lambda_function.functions["product_manager"].invoke_arn
+}
+
+resource "aws_api_gateway_method" "products_id_options" {
+  rest_api_id   = aws_api_gateway_rest_api.capstone_api.id
+  resource_id   = aws_api_gateway_resource.products_id.id
+  http_method   = "OPTIONS"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "products_id_options" {
+  rest_api_id = aws_api_gateway_rest_api.capstone_api.id
+  resource_id = aws_api_gateway_resource.products_id.id
+  http_method = aws_api_gateway_method.products_id_options.http_method
+  type        = "MOCK"
+
+  request_templates = {
+    "application/json" = "{\"statusCode\": 200}"
+  }
+}
+
+resource "aws_api_gateway_method_response" "products_id_options_response" {
+  rest_api_id = aws_api_gateway_rest_api.capstone_api.id
+  resource_id = aws_api_gateway_resource.products_id.id
+  http_method = aws_api_gateway_method.products_id_options.http_method
+  status_code = "200"
+
+  response_parameters = {
+    "method.response.header.Access-Control-Allow-Headers" = true
+    "method.response.header.Access-Control-Allow-Methods" = true
+    "method.response.header.Access-Control-Allow-Origin" = true
+  }
+}
+
+resource "aws_api_gateway_integration_response" "products_id_options_integration_response" {
+  rest_api_id = aws_api_gateway_rest_api.capstone_api.id
+  resource_id = aws_api_gateway_resource.products_id.id
+  http_method = aws_api_gateway_method.products_id_options.http_method
+  status_code = aws_api_gateway_method_response.products_id_options_response.status_code
+
+  response_parameters = {
+    "method.response.header.Access-Control-Allow-Headers" = "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+    "method.response.header.Access-Control-Allow-Methods" = "'PUT,DELETE,OPTIONS'"
+    "method.response.header.Access-Control-Allow-Origin" = "'*'"
+  }
+
+  response_templates = {
+    "application/json" = ""
+  }
+
+  depends_on = [aws_api_gateway_integration.products_id_options]
 }
 
 # ============ CORS SUPPORT ============
@@ -1084,6 +1259,56 @@ resource "aws_api_gateway_integration_response" "promos_options_integration_resp
   depends_on = [aws_api_gateway_integration.promos_options]
 }
 
+resource "aws_api_gateway_method" "reviews_options" {
+  rest_api_id   = aws_api_gateway_rest_api.capstone_api.id
+  resource_id   = aws_api_gateway_resource.reviews.id
+  http_method   = "OPTIONS"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "reviews_options" {
+  rest_api_id = aws_api_gateway_rest_api.capstone_api.id
+  resource_id = aws_api_gateway_resource.reviews.id
+  http_method = aws_api_gateway_method.reviews_options.http_method
+  type        = "MOCK"
+
+  request_templates = {
+    "application/json" = "{\"statusCode\": 200}"
+  }
+}
+
+resource "aws_api_gateway_method_response" "reviews_options_response" {
+  rest_api_id = aws_api_gateway_rest_api.capstone_api.id
+  resource_id = aws_api_gateway_resource.reviews.id
+  http_method = aws_api_gateway_method.reviews_options.http_method
+  status_code = "200"
+
+  response_parameters = {
+    "method.response.header.Access-Control-Allow-Headers" = true
+    "method.response.header.Access-Control-Allow-Methods" = true
+    "method.response.header.Access-Control-Allow-Origin"  = true
+  }
+}
+
+resource "aws_api_gateway_integration_response" "reviews_options_integration_response" {
+  rest_api_id = aws_api_gateway_rest_api.capstone_api.id
+  resource_id = aws_api_gateway_resource.reviews.id
+  http_method = aws_api_gateway_method.reviews_options.http_method
+  status_code = aws_api_gateway_method_response.reviews_options_response.status_code
+
+  response_parameters = {
+    "method.response.header.Access-Control-Allow-Headers" = "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+    "method.response.header.Access-Control-Allow-Methods" = "'GET,POST,OPTIONS'"
+    "method.response.header.Access-Control-Allow-Origin"  = "'*'"
+  }
+
+  response_templates = {
+    "application/json" = ""
+  }
+
+  depends_on = [aws_api_gateway_integration.reviews_options]
+}
+
 resource "aws_api_gateway_deployment" "capstone_api_deploy" {
   depends_on = [
     aws_api_gateway_integration.products_get,
@@ -1091,6 +1316,7 @@ resource "aws_api_gateway_deployment" "capstone_api_deploy" {
     aws_api_gateway_integration.products_put,
     aws_api_gateway_integration.products_delete,
     aws_api_gateway_integration.products_options,
+    aws_api_gateway_integration.products_id_options,
     aws_api_gateway_integration.orders_get,
     aws_api_gateway_integration.orders_post,
     aws_api_gateway_integration.orders_options,
@@ -1105,12 +1331,17 @@ resource "aws_api_gateway_deployment" "capstone_api_deploy" {
     aws_api_gateway_integration.profile_options,
     aws_api_gateway_integration.promos_get,
     aws_api_gateway_integration.promos_options,
+    aws_api_gateway_integration.reviews_get,
+    aws_api_gateway_integration.reviews_post,
+    aws_api_gateway_integration.reviews_options,
     aws_api_gateway_integration_response.products_options_integration_response,
+    aws_api_gateway_integration_response.products_id_options_integration_response,
     aws_api_gateway_integration_response.orders_options_integration_response,
     aws_api_gateway_integration_response.process_order_options_integration_response,
     aws_api_gateway_integration_response.admin_data_options_integration_response,
     aws_api_gateway_integration_response.profile_options_integration_response,
-    aws_api_gateway_integration_response.promos_options_integration_response
+    aws_api_gateway_integration_response.promos_options_integration_response,
+    aws_api_gateway_integration_response.reviews_options_integration_response
   ]
 
   triggers = {
@@ -1123,11 +1354,13 @@ resource "aws_api_gateway_deployment" "capstone_api_deploy" {
       aws_api_gateway_resource.admin_data.id,
       aws_api_gateway_resource.profile.id,
       aws_api_gateway_resource.promos.id,
+      aws_api_gateway_resource.reviews.id,
       aws_api_gateway_method.products_get.id,
       aws_api_gateway_method.products_post.id,
       aws_api_gateway_method.products_put.id,
       aws_api_gateway_method.products_delete.id,
       aws_api_gateway_method.products_options.id,
+      aws_api_gateway_method.products_id_options.id,
       aws_api_gateway_method.orders_get.id,
       aws_api_gateway_method.orders_post.id,
       aws_api_gateway_method.orders_options.id,
@@ -1142,11 +1375,15 @@ resource "aws_api_gateway_deployment" "capstone_api_deploy" {
       aws_api_gateway_method.profile_options.id,
       aws_api_gateway_method.promos_get.id,
       aws_api_gateway_method.promos_options.id,
+      aws_api_gateway_method.reviews_get.id,
+      aws_api_gateway_method.reviews_post.id,
+      aws_api_gateway_method.reviews_options.id,
       aws_api_gateway_integration.products_get.id,
       aws_api_gateway_integration.products_post.id,
       aws_api_gateway_integration.products_put.id,
       aws_api_gateway_integration.products_delete.id,
       aws_api_gateway_integration.products_options.id,
+      aws_api_gateway_integration.products_id_options.id,
       aws_api_gateway_integration.orders_get.id,
       aws_api_gateway_integration.orders_post.id,
       aws_api_gateway_integration.orders_options.id,
@@ -1161,12 +1398,17 @@ resource "aws_api_gateway_deployment" "capstone_api_deploy" {
       aws_api_gateway_integration.profile_options.id,
       aws_api_gateway_integration.promos_get.id,
       aws_api_gateway_integration.promos_options.id,
+      aws_api_gateway_integration.reviews_get.id,
+      aws_api_gateway_integration.reviews_post.id,
+      aws_api_gateway_integration.reviews_options.id,
       aws_api_gateway_integration_response.products_options_integration_response.id,
+      aws_api_gateway_integration_response.products_id_options_integration_response.id,
       aws_api_gateway_integration_response.orders_options_integration_response.id,
       aws_api_gateway_integration_response.process_order_options_integration_response.id,
       aws_api_gateway_integration_response.admin_data_options_integration_response.id,
       aws_api_gateway_integration_response.profile_options_integration_response.id,
-      aws_api_gateway_integration_response.promos_options_integration_response.id
+      aws_api_gateway_integration_response.promos_options_integration_response.id,
+      aws_api_gateway_integration_response.reviews_options_integration_response.id
     ]))
   }
 
@@ -1348,4 +1590,20 @@ resource "aws_lambda_permission" "api_gateway_promos_get" {
   function_name = aws_lambda_function.functions["promo_lookup"].function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_api_gateway_rest_api.capstone_api.execution_arn}/*/GET/promos"
+}
+
+resource "aws_lambda_permission" "api_gateway_reviews_get" {
+  statement_id  = "lambda-perm-reviews-get"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.functions["reviews"].function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_api_gateway_rest_api.capstone_api.execution_arn}/*/GET/reviews"
+}
+
+resource "aws_lambda_permission" "api_gateway_reviews_post" {
+  statement_id  = "lambda-perm-reviews-post"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.functions["reviews"].function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_api_gateway_rest_api.capstone_api.execution_arn}/*/POST/reviews"
 }

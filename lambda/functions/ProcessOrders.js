@@ -1,6 +1,6 @@
 const Stripe = require('stripe');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, GetCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, BatchGetCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
 // Initialize Stripe with the Secret Key from environment variables for security
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const HST_RATE = 0.13;
@@ -15,13 +15,59 @@ const headers = {
 
 const roundCurrency = (amount) => Math.round(Number(amount || 0) * 100) / 100;
 
-const normalizeItems = (items) => (Array.isArray(items) ? items : []).map((item) => ({
-    productId: String(item.productId || '').trim(),
-    name: String(item.name || '').trim(),
-    category: String(item.category || '').trim(),
-    qty: Math.max(1, Number(item.qty || 1)),
-    price: Number(item.price || 0)
-})).filter((item) => item.productId && item.name && item.price >= 0 && item.qty > 0);
+const normalizeRequestedItems = (items) => {
+    const itemMap = new Map();
+
+    for (const item of Array.isArray(items) ? items : []) {
+        const productId = String(item.productId || '').trim();
+        const qty = Math.max(1, Number(item.qty || 1));
+
+        if (!productId || qty <= 0) {
+            continue;
+        }
+
+        const current = itemMap.get(productId) || { productId, qty: 0 };
+        current.qty += qty;
+        itemMap.set(productId, current);
+    }
+
+    return Array.from(itemMap.values());
+};
+
+const getAuthoritativeItems = async (requestedItems) => {
+    const tableName = process.env.PRODUCTS_TABLE || 'Products';
+    const result = await docClient.send(new BatchGetCommand({
+        RequestItems: {
+            [tableName]: {
+                Keys: requestedItems.map((item) => ({ productId: item.productId }))
+            }
+        }
+    }));
+
+    const products = result.Responses?.[tableName] || [];
+    const productMap = new Map(products.map((product) => [product.productId, product]));
+
+    return requestedItems.map((requestedItem) => {
+        const product = productMap.get(requestedItem.productId);
+
+        if (!product) {
+            throw new Error(`Product ${requestedItem.productId} is no longer available.`);
+        }
+
+        if (Number(product.stock || 0) < requestedItem.qty) {
+            throw new Error(`${product.name || requestedItem.productId} only has ${product.stock || 0} left in stock.`);
+        }
+
+        return {
+            productId: product.productId,
+            name: String(product.name || '').trim(),
+            category: String(product.category || '').trim(),
+            qty: requestedItem.qty,
+            price: Number(product.price || 0),
+            imageUrl: product.images?.[0] || product.imageUrl || ''
+        };
+    }).filter((item) => item.productId && item.name && item.price >= 0 && item.qty > 0);
+};
 
 const calculateDiscount = (items, promo) => {
     if (!promo || promo.isActive === false || (promo.expiresAt && new Date(promo.expiresAt).getTime() < Date.now())) {
@@ -173,17 +219,19 @@ exports.handler = async (event) => {
         }
 
         const body = JSON.parse(event.body || '{}');
-        const items = normalizeItems(body.items);
+        const requestedItems = normalizeRequestedItems(body.items);
         const promoCode = String(body.promoCode || '').trim().toUpperCase();
         const shippingAddress = normalizeAddress(body.shippingAddress);
 
-        if (items.length === 0) {
+        if (requestedItems.length === 0) {
             return {
                 statusCode: 400,
                 headers,
                 body: JSON.stringify({ message: 'At least one item is required.' })
             };
         }
+
+        const items = await getAuthoritativeItems(requestedItems);
 
         let appliedPromo = null;
         if (promoCode) {

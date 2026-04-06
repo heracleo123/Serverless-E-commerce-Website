@@ -6,6 +6,8 @@ const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
 const ses = new SESClient({ region: process.env.AWS_REGION || "us-east-1" });
 
+const TRACKING_STATUSES = new Set(['SHIPPED', 'DELIVERED']);
+
 const decodeJwtPayload = (token) => {
     if (!token) return null;
 
@@ -22,18 +24,13 @@ const decodeJwtPayload = (token) => {
     }
 };
 
-const buildTrackingNumber = (orderId, existingTrackingNumber) => {
-    if (existingTrackingNumber) {
-        return existingTrackingNumber;
-    }
+const normalizeOrderStatus = (status) => String(status || 'PENDING').trim().toUpperCase();
 
-    const compactOrderId = String(orderId || 'ORDER').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-    return `ET-${compactOrderId.slice(-12).padStart(12, '0')}`;
-};
+const shouldIncludeTracking = (status) => TRACKING_STATUSES.has(normalizeOrderStatus(status));
 
 const normalizeOrder = (order) => ({
     ...order,
-    trackingNumber: buildTrackingNumber(order.orderId, order.trackingNumber)
+    trackingNumber: shouldIncludeTracking(order.status) ? String(order.trackingNumber || '').trim() : ''
 });
 
 const formatCurrency = (amount) => `$${Number(amount || 0).toFixed(2)}`;
@@ -73,7 +70,9 @@ const buildReceiptHtml = (order) => {
                 <h1 style="margin: 0 0 16px; font-size: 28px; font-weight: 800;">Thanks for your order</h1>
                 <p style="margin: 0 0 16px; color: #52525b;">We appreciate you shopping with ElectroTech. Your order is in, your receipt is below, and our team will keep you posted as it moves along.</p>
                 <p style="margin: 0 0 8px;"><strong>Order Number:</strong> ${order.orderId}</p>
-                <p style="margin: 0 0 8px;"><strong>Tracking Number:</strong> ${order.trackingNumber}</p>
+                ${order.trackingNumber
+            ? `<p style="margin: 0 0 8px;"><strong>Tracking Number:</strong> ${order.trackingNumber}</p>`
+            : '<p style="margin: 0 0 8px; color: #52525b;">Tracking will be shared once your order ships.</p>'}
                 <p style="margin: 0 0 24px;"><strong>Order Date:</strong> ${order.createdAt ? new Date(order.createdAt).toLocaleString('en-CA') : 'Recent'}</p>
 
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
@@ -109,7 +108,7 @@ const sendConfirmationEmail = async (order, targetEmail) => {
                     Data: [
                         'Thanks for ordering with ElectroTech.',
                         `Order Number: ${normalizedOrder.orderId}`,
-                        `Tracking Number: ${normalizedOrder.trackingNumber}`,
+                        ...(normalizedOrder.trackingNumber ? [`Tracking Number: ${normalizedOrder.trackingNumber}`] : ['Tracking: We will send it once your order ships.']),
                         `Subtotal: ${formatCurrency(normalizedOrder.subtotal)}`,
                         ...(Number(normalizedOrder.discountAmount || 0) > 0 ? [
                             `Promo Code: ${normalizedOrder.promoCode || 'Applied'}`,
@@ -230,7 +229,7 @@ exports.handler = async (event) => {
                 body: JSON.stringify({
                     message: `Confirmation resent to ${targetEmail}.`,
                     orderId,
-                    trackingNumber: buildTrackingNumber(order.orderId, order.trackingNumber)
+                    trackingNumber: normalizeOrder(order).trackingNumber
                 })
             };
         }

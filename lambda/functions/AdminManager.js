@@ -1,11 +1,15 @@
+const Stripe = require('stripe');
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand, ScanCommand } = require("@aws-sdk/lib-dynamodb");
+const { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand, QueryCommand, ScanCommand, TransactWriteCommand } = require("@aws-sdk/lib-dynamodb");
 const { CognitoIdentityProviderClient, AdminAddUserToGroupCommand, AdminListGroupsForUserCommand, AdminRemoveUserFromGroupCommand, ListUsersCommand } = require("@aws-sdk/client-cognito-identity-provider");
 const { SESClient, SendEmailCommand } = require("@aws-sdk/client-ses");
 
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const cognitoClient = new CognitoIdentityProviderClient({});
 const sesClient = new SESClient({ region: process.env.AWS_REGION || "us-east-1" });
+const ADULT_AGE_YEARS = 18;
+const TRACKING_STATUSES = new Set(['SHIPPED', 'DELIVERED']);
 
 const headers = {
     "Content-Type": "application/json",
@@ -57,6 +61,13 @@ const formatCurrency = (amount) => new Intl.NumberFormat('en-CA', {
     currency: 'CAD'
 }).format(Number(amount || 0));
 
+const serializeAdminOrder = (order) => ({
+    ...order,
+    orderNumber: String(order.orderId || '').trim(),
+    trackingNumber: getTrackingNumberForStatus(order.orderId, order.status, order.trackingNumber),
+    refundReference: String(order.refundReference || order.refundId || '').trim(),
+});
+
 const isPromoActive = (promo) => {
     if (!promo || promo.isActive === false) {
         return false;
@@ -85,7 +96,197 @@ const buildTrackingNumber = (orderId, existingTrackingNumber) => {
     return `ET-${compactOrderId.slice(-12).padStart(12, '0')}`;
 };
 
+const normalizeOrderStatus = (status) => String(status || 'PENDING').trim().toUpperCase();
+
+const shouldIncludeTracking = (status) => TRACKING_STATUSES.has(normalizeOrderStatus(status));
+
+const getTrackingNumberForStatus = (orderId, status, existingTrackingNumber) => {
+    const currentTrackingNumber = String(existingTrackingNumber || '').trim();
+    if (currentTrackingNumber) {
+        return currentTrackingNumber;
+    }
+
+    return shouldIncludeTracking(status) ? buildTrackingNumber(orderId) : '';
+};
+
+const sanitizePublicName = (value) => String(value || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
+
+const resolveStoredPublicName = (...values) => {
+    for (const value of values) {
+        const nextValue = sanitizePublicName(value);
+        if (nextValue) {
+            return nextValue;
+        }
+    }
+
+    return '';
+};
+
+const normalizeBirthDate = (birthDate) => {
+    const normalized = String(birthDate || '').trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : '';
+};
+
+const validateAdultBirthDate = (birthDate) => {
+    const normalized = normalizeBirthDate(birthDate);
+    if (!normalized) {
+        return '';
+    }
+
+    const cutoffDate = new Date();
+    cutoffDate.setFullYear(cutoffDate.getFullYear() - ADULT_AGE_YEARS);
+    cutoffDate.setHours(23, 59, 59, 999);
+    const parsedDate = new Date(`${normalized}T00:00:00.000Z`);
+
+    if (Number.isNaN(parsedDate.getTime()) || parsedDate > cutoffDate) {
+        throw new Error('Users must be at least 18 years old.');
+    }
+
+    return normalized;
+};
+
+const normalizeUsername = (username) => {
+    const normalized = sanitizePublicName(username);
+    if (!normalized) {
+        return '';
+    }
+
+    if (normalized.length < 3 || normalized.length > 24) {
+        throw new Error('Username must be between 3 and 24 characters.');
+    }
+
+    return normalized;
+};
+
+const normalizeDisplayName = (displayName) => String(displayName || '').trim().slice(0, 50);
+
+const normalizeAddresses = (addresses) => {
+    return (Array.isArray(addresses) ? addresses : [])
+        .map((address, index) => ({
+            id: address.id || `address-${index + 1}`,
+            label: String(address.label || 'Address').trim(),
+            fullName: String(address.fullName || '').trim(),
+            line1: String(address.line1 || '').trim(),
+            line2: String(address.line2 || '').trim(),
+            city: String(address.city || '').trim(),
+            province: String(address.province || '').trim(),
+            postalCode: String(address.postalCode || '').trim(),
+            country: String(address.country || 'Canada').trim()
+        }))
+        .filter((address) => address.fullName && address.line2 && address.line1 && address.city && address.province && address.postalCode && address.country)
+        .slice(0, 5);
+};
+
+const ensureUniqueUsername = async (userId, username) => {
+    if (!username) {
+        return;
+    }
+
+    const result = await docClient.send(new ScanCommand({
+        TableName: process.env.USER_PROFILES_TABLE,
+        ProjectionExpression: 'userId, username'
+    }));
+
+    const conflict = (result.Items || []).find((item) => (
+        item.userId !== userId && String(item.username || '').trim().toLowerCase() === username
+    ));
+
+    if (conflict) {
+        throw new Error('That username is already taken.');
+    }
+};
+
+const groupItemsByProduct = (items) => {
+    const grouped = new Map();
+
+    for (const item of Array.isArray(items) ? items : []) {
+        const productId = String(item.productId || '').trim();
+        const qty = Math.max(1, Number(item.qty || 1));
+
+        if (!productId || qty <= 0) {
+            continue;
+        }
+
+        grouped.set(productId, (grouped.get(productId) || 0) + qty);
+    }
+
+    return Array.from(grouped.entries()).map(([productId, qty]) => ({ productId, qty }));
+};
+
+const applyInventoryChange = async (items, direction) => {
+    const groupedItems = groupItemsByProduct(items);
+    if (groupedItems.length === 0) {
+        return;
+    }
+
+    const updatedAt = new Date().toISOString();
+    await docClient.send(new TransactWriteCommand({
+        TransactItems: groupedItems.map((item) => ({
+            Update: {
+                TableName: process.env.PRODUCTS_TABLE || 'Products',
+                Key: { productId: item.productId },
+                UpdateExpression: 'SET stock = stock + :delta, updatedAt = :updatedAt',
+                ConditionExpression: direction === 'reserve'
+                    ? 'attribute_exists(productId) AND stock >= :requiredQty'
+                    : 'attribute_exists(productId)',
+                ExpressionAttributeValues: direction === 'reserve'
+                    ? {
+                        ':delta': -item.qty,
+                        ':requiredQty': item.qty,
+                        ':updatedAt': updatedAt,
+                    }
+                    : {
+                        ':delta': item.qty,
+                        ':updatedAt': updatedAt,
+                    }
+            }
+        }))
+    }));
+};
+
+const STATUS_EMAIL_COPY = {
+    PENDING: {
+        subject: 'We got your order and we are on it',
+        headline: 'Your order is officially in the queue',
+        intro: 'Good news. Your order is locked in and our team is getting everything lined up behind the scenes.',
+        detail: 'We will send another update as soon as it moves into the next step.',
+    },
+    PROCESSING: {
+        subject: 'Your order is getting packed up',
+        headline: 'The team is putting your order together',
+        intro: 'We are pulling your items, checking everything over, and getting the box ready to go.',
+        detail: 'As soon as it ships, we will send your tracking details right away.',
+    },
+    SHIPPED: {
+        subject: 'Your order is on the move',
+        headline: 'Your order just shipped',
+        intro: 'Your package is out the door and headed your way. This is the fun update.',
+        detail: 'You can use the tracking number below to follow the trip.',
+    },
+    DELIVERED: {
+        subject: 'Your order has arrived',
+        headline: 'Your delivery should be with you now',
+        intro: 'Your order shows as delivered. Time to unbox something good.',
+        detail: 'If anything looks off, reply with your order number and we will jump in.',
+    },
+    CANCELLED: {
+        subject: 'Your order was cancelled and refunded',
+        headline: 'Your cancellation is complete',
+        intro: 'We cancelled the order and reversed the charge back to the card on file.',
+        detail: 'Banks can take a few business days to show the refund, but the reversal has been sent from our side.',
+    },
+    DEFAULT: {
+        subject: 'There is a fresh update on your order',
+        headline: 'Your order has a new update',
+        intro: 'We wanted to send a quick heads-up so you are not left guessing.',
+        detail: 'Check the latest status below for the current snapshot.',
+    },
+};
+
+const getStatusEmailCopy = (status) => STATUS_EMAIL_COPY[normalizeOrderStatus(status)] || STATUS_EMAIL_COPY.DEFAULT;
+
 const buildStatusEmailHtml = (order) => {
+    const emailCopy = getStatusEmailCopy(order.status);
     const itemsHtml = (order.items || []).map((item) => `
         <tr>
             <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb;">${item.name}</td>
@@ -93,14 +294,27 @@ const buildStatusEmailHtml = (order) => {
             <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; text-align: right;">${formatCurrency(item.price)}</td>
         </tr>
     `).join('');
+    const trackingMarkup = order.trackingNumber
+        ? `<p style="margin: 0 0 8px;"><strong>Tracking Number:</strong> ${order.trackingNumber}</p>`
+        : '<p style="margin: 0 0 8px; color: #52525b;">Tracking will be shared as soon as the package is with the carrier.</p>';
+    const refundMarkup = normalizeOrderStatus(order.status) === 'CANCELLED'
+        ? `
+            <p style="margin: 0 0 8px;"><strong>Refund Amount:</strong> ${formatCurrency(order.refundAmount || order.total)}</p>
+            <p style="margin: 0 0 8px;"><strong>Refund Reference:</strong> ${order.refundId || 'Submitted to Stripe'}</p>
+          `
+        : '';
 
     return `
         <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto; color: #18181b;">
             <div style="padding: 24px; border: 1px solid #e5e7eb; border-radius: 20px;">
                 <p style="margin: 0 0 8px; color: #e11d48; font-size: 12px; font-weight: 700; letter-spacing: 0.2em; text-transform: uppercase;">ElectroTech Order Update</p>
-                <h1 style="margin: 0 0 16px; font-size: 28px; font-weight: 800;">Status: ${order.status}</h1>
+                <h1 style="margin: 0 0 16px; font-size: 28px; font-weight: 800;">${emailCopy.headline}</h1>
+                <p style="margin: 0 0 12px; color: #52525b;">${emailCopy.intro}</p>
+                <p style="margin: 0 0 20px; color: #52525b;">${emailCopy.detail}</p>
                 <p style="margin: 0 0 8px;"><strong>Order Number:</strong> ${order.orderId}</p>
-                <p style="margin: 0 0 8px;"><strong>Tracking Number:</strong> ${order.trackingNumber}</p>
+                <p style="margin: 0 0 8px;"><strong>Status:</strong> ${normalizeOrderStatus(order.status)}</p>
+                ${trackingMarkup}
+                ${refundMarkup}
                 <p style="margin: 0 0 24px;"><strong>Updated:</strong> ${order.updatedAt ? new Date(order.updatedAt).toLocaleString('en-CA') : new Date().toLocaleString('en-CA')}</p>
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
                     <thead>
@@ -118,13 +332,179 @@ const buildStatusEmailHtml = (order) => {
     `;
 };
 
-const listUsers = async () => {
-    const result = await cognitoClient.send(new ListUsersCommand({
-        UserPoolId: process.env.USER_POOL_ID,
-        Limit: 60
-    }));
+const buildStatusEmailText = (order) => {
+    const emailCopy = getStatusEmailCopy(order.status);
 
-    const users = await Promise.all((result.Users || []).map(async (user) => {
+    return [
+        emailCopy.headline,
+        '',
+        emailCopy.intro,
+        emailCopy.detail,
+        '',
+        `Order Number: ${order.orderId}`,
+        `Status: ${normalizeOrderStatus(order.status)}`,
+        ...(order.trackingNumber ? [`Tracking Number: ${order.trackingNumber}`] : ['Tracking: We will share it as soon as the carrier scans your package.']),
+        ...(normalizeOrderStatus(order.status) === 'CANCELLED' ? [
+            `Refund Amount: ${formatCurrency(order.refundAmount || order.total)}`,
+            `Refund Reference: ${order.refundId || 'Submitted to Stripe'}`,
+            'The reversal has been sent back to the card on file.'
+        ] : []),
+        `Order Total: ${formatCurrency(order.total)}`,
+    ].join('\n');
+};
+
+const sendStatusEmail = async (order) => {
+    if (!order.email) {
+        return;
+    }
+
+    const emailCopy = getStatusEmailCopy(order.status);
+    await sesClient.send(new SendEmailCommand({
+        Source: process.env.SES_FROM_ADDRESS,
+        Destination: { ToAddresses: [order.email] },
+        Message: {
+            Subject: { Data: `ElectroTech: ${emailCopy.subject}` },
+            Body: {
+                Html: { Data: buildStatusEmailHtml(order) },
+                Text: { Data: buildStatusEmailText(order) },
+            }
+        }
+    }));
+};
+
+const getOrderCreatedAtEpoch = (order) => {
+    const parsed = Date.parse(String(order.createdAt || '').trim());
+    return Number.isNaN(parsed) ? 0 : Math.floor(parsed / 1000);
+};
+
+const checkoutSessionMatchesOrder = (session, order) => {
+    const orderSuffix = String(order.orderId || '').trim().replace(/^STRIPE-/i, '');
+    const sessionId = String(session?.id || '').trim();
+    const sessionEmail = String(session?.customer_details?.email || session?.customer_email || '').trim().toLowerCase();
+    const orderEmail = String(order.email || '').trim().toLowerCase();
+    const sessionAmount = Number(session?.amount_total || 0) / 100;
+    const orderTotal = Number(order.total || 0);
+
+    return Boolean(
+        sessionId
+        && orderSuffix
+        && sessionId.endsWith(orderSuffix)
+        && (!orderEmail || !sessionEmail || sessionEmail === orderEmail)
+        && Math.abs(sessionAmount - orderTotal) < 0.01
+    );
+};
+
+const resolveRefundPaymentReference = async (order) => {
+    const existingPaymentIntentId = String(order.paymentIntentId || '').trim();
+    const existingCheckoutSessionId = String(order.checkoutSessionId || '').trim();
+
+    if (existingPaymentIntentId) {
+        return {
+            paymentIntentId: existingPaymentIntentId,
+            checkoutSessionId: existingCheckoutSessionId,
+        };
+    }
+
+    if (existingCheckoutSessionId) {
+        const session = await stripe.checkout.sessions.retrieve(existingCheckoutSessionId);
+        const paymentIntentId = String(session?.payment_intent?.id || session?.payment_intent || '').trim();
+        if (paymentIntentId) {
+            return {
+                paymentIntentId,
+                checkoutSessionId: String(session.id || existingCheckoutSessionId).trim(),
+            };
+        }
+    }
+
+    const createdAtEpoch = getOrderCreatedAtEpoch(order);
+    const createdRange = createdAtEpoch
+        ? { gte: Math.max(0, createdAtEpoch - 86400), lte: createdAtEpoch + 86400 }
+        : undefined;
+    const sessions = await stripe.checkout.sessions.list({
+        limit: 100,
+        ...(createdRange ? { created: createdRange } : {}),
+    });
+
+    const matchedSession = (sessions.data || []).find((session) => checkoutSessionMatchesOrder(session, order));
+    const matchedPaymentIntentId = String(matchedSession?.payment_intent?.id || matchedSession?.payment_intent || '').trim();
+
+    if (matchedSession?.id && matchedPaymentIntentId) {
+        return {
+            paymentIntentId: matchedPaymentIntentId,
+            checkoutSessionId: String(matchedSession.id || '').trim(),
+        };
+    }
+
+    throw new Error('Unable to reverse the charge because the Stripe payment reference could not be recovered for this order.');
+};
+
+const refundOrderPayment = async (order) => {
+    const paymentReference = await resolveRefundPaymentReference(order);
+    const paymentIntentId = paymentReference.paymentIntentId;
+
+    let refund;
+
+    try {
+        refund = await stripe.refunds.create({
+            payment_intent: paymentIntentId,
+            reason: 'requested_by_customer',
+            metadata: {
+                orderId: String(order.orderId || ''),
+            },
+        });
+    } catch (error) {
+        if (error?.code !== 'charge_already_refunded') {
+            throw error;
+        }
+
+        const refunds = await stripe.refunds.list({
+            payment_intent: paymentIntentId,
+            limit: 1,
+        });
+
+        refund = refunds.data?.[0];
+        if (!refund) {
+            throw error;
+        }
+    }
+
+    return {
+        paymentIntentId,
+        checkoutSessionId: paymentReference.checkoutSessionId,
+        refundId: refund.id,
+        refundStatus: refund.status,
+        refundAmount: Number(refund.amount || 0) / 100,
+        refundedAt: new Date().toISOString(),
+    };
+};
+
+const listUsers = async () => {
+    const [profilesResult, ordersResult, usersResult] = await Promise.all([
+        docClient.send(new ScanCommand({ TableName: process.env.USER_PROFILES_TABLE })),
+        docClient.send(new ScanCommand({ TableName: process.env.ORDERS_TABLE })),
+        cognitoClient.send(new ListUsersCommand({
+            UserPoolId: process.env.USER_POOL_ID,
+            Limit: 60
+        }))
+    ]);
+
+    const profilesByUserId = new Map((profilesResult.Items || []).map((profile) => [profile.userId, profile]));
+    const orderSummaryByUserId = new Map();
+
+    for (const order of ordersResult.Items || []) {
+        const userId = String(order.userId || '').trim();
+        if (!userId) {
+            continue;
+        }
+
+        const current = orderSummaryByUserId.get(userId) || { orderCount: 0, lifetimeSpend: 0, lastOrderAt: '' };
+        current.orderCount += 1;
+        current.lifetimeSpend += Number(order.total || 0);
+        current.lastOrderAt = String(order.createdAt || '') > current.lastOrderAt ? String(order.createdAt || '') : current.lastOrderAt;
+        orderSummaryByUserId.set(userId, current);
+    }
+
+    const users = await Promise.all((usersResult.Users || []).map(async (user) => {
         const groupsResult = await cognitoClient.send(new AdminListGroupsForUserCommand({
             UserPoolId: process.env.USER_POOL_ID,
             Username: user.Username
@@ -132,6 +512,8 @@ const listUsers = async () => {
 
         const emailAttribute = (user.Attributes || []).find((attribute) => attribute.Name === 'email');
         const subAttribute = (user.Attributes || []).find((attribute) => attribute.Name === 'sub');
+        const profile = profilesByUserId.get(subAttribute?.Value || '') || {};
+        const orderSummary = orderSummaryByUserId.get(subAttribute?.Value || '') || { orderCount: 0, lifetimeSpend: 0, lastOrderAt: '' };
 
         return {
             username: user.Username,
@@ -140,7 +522,17 @@ const listUsers = async () => {
             status: user.UserStatus,
             enabled: user.Enabled,
             groups: (groupsResult.Groups || []).map((group) => group.GroupName),
-            isAdmin: (groupsResult.Groups || []).some((group) => group.GroupName === 'Admins')
+            isAdmin: (groupsResult.Groups || []).some((group) => group.GroupName === 'Admins'),
+            profile: {
+                username: resolveStoredPublicName(profile.username, profile.displayName),
+                displayName: resolveStoredPublicName(profile.username, profile.displayName),
+                photoUrl: String(profile.photoUrl || '').trim(),
+                birthDate: normalizeBirthDate(profile.birthDate),
+                addressCount: Array.isArray(profile.addresses) ? profile.addresses.length : 0,
+            },
+            orderCount: orderSummary.orderCount,
+            lifetimeSpend: Math.round(orderSummary.lifetimeSpend * 100) / 100,
+            lastOrderAt: orderSummary.lastOrderAt,
         };
     }));
 
@@ -153,19 +545,100 @@ const listOrders = async () => {
     }));
 
     return (result.Items || [])
-        .filter((order) => !['DELIVERED', 'CANCELLED'].includes(String(order.status || '').toUpperCase()))
-        .map((order) => ({
-            ...order,
-            trackingNumber: buildTrackingNumber(order.orderId, order.trackingNumber)
-        }))
+        .map((order) => serializeAdminOrder(order))
         .sort((left, right) => {
-            const leftPending = ['PENDING', 'PROCESSING'].includes(String(left.status || '').toUpperCase()) ? 0 : 1;
-            const rightPending = ['PENDING', 'PROCESSING'].includes(String(right.status || '').toUpperCase()) ? 0 : 1;
-            if (leftPending !== rightPending) {
-                return leftPending - rightPending;
+            const statusRank = {
+                PENDING: 0,
+                PROCESSING: 1,
+                SHIPPED: 2,
+                DELIVERED: 3,
+                CANCELLED: 4,
+            };
+            const leftRank = statusRank[normalizeOrderStatus(left.status)] ?? 99;
+            const rightRank = statusRank[normalizeOrderStatus(right.status)] ?? 99;
+            if (leftRank !== rightRank) {
+                return leftRank - rightRank;
             }
             return String(right.createdAt || '').localeCompare(String(left.createdAt || ''));
         });
+};
+
+const getUserDetail = async (userId) => {
+    if (!userId) {
+        throw new Error('userId is required.');
+    }
+
+    const [profileResult, ordersResult] = await Promise.all([
+        docClient.send(new GetCommand({
+            TableName: process.env.USER_PROFILES_TABLE,
+            Key: { userId }
+        })),
+        docClient.send(new QueryCommand({
+            TableName: process.env.ORDERS_TABLE,
+            IndexName: 'userId-index',
+            KeyConditionExpression: 'userId = :userId',
+            ExpressionAttributeValues: {
+                ':userId': userId
+            },
+            ScanIndexForward: false
+        }))
+    ]);
+
+    return {
+        profile: {
+            userId,
+            email: String(profileResult.Item?.email || '').trim(),
+            username: resolveStoredPublicName(profileResult.Item?.username, profileResult.Item?.displayName),
+            displayName: resolveStoredPublicName(profileResult.Item?.username, profileResult.Item?.displayName),
+            photoUrl: String(profileResult.Item?.photoUrl || '').trim(),
+            birthDate: normalizeBirthDate(profileResult.Item?.birthDate),
+            addresses: Array.isArray(profileResult.Item?.addresses) ? profileResult.Item.addresses : [],
+            defaultAddressId: profileResult.Item?.defaultAddressId || null,
+            createdAt: profileResult.Item?.createdAt || null,
+            updatedAt: profileResult.Item?.updatedAt || null,
+        },
+        orders: (ordersResult.Items || []).map((order) => serializeAdminOrder(order))
+    };
+};
+
+const saveUserProfile = async (payload) => {
+    const userId = String(payload.userId || '').trim();
+    if (!userId) {
+        throw new Error('userId is required.');
+    }
+
+    const existingProfileResult = await docClient.send(new GetCommand({
+        TableName: process.env.USER_PROFILES_TABLE,
+        Key: { userId }
+    }));
+
+    const existingProfile = existingProfileResult.Item || {};
+    const username = normalizeUsername(payload.profile?.username ?? payload.profile?.displayName ?? existingProfile.username ?? existingProfile.displayName);
+    await ensureUniqueUsername(userId, username);
+    const addresses = normalizeAddresses(payload.profile?.addresses);
+    const defaultAddressId = addresses.some((address) => address.id === payload.profile?.defaultAddressId)
+        ? payload.profile.defaultAddressId
+        : addresses[0]?.id || null;
+
+    const profile = {
+        userId,
+        email: String(payload.profile?.email || existingProfile.email || '').trim(),
+        username,
+        displayName: username,
+        photoUrl: String(payload.profile?.photoUrl || existingProfile.photoUrl || '').trim(),
+        addresses,
+        defaultAddressId,
+        birthDate: validateAdultBirthDate(payload.profile?.birthDate),
+        createdAt: existingProfile.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+    };
+
+    await docClient.send(new PutCommand({
+        TableName: process.env.USER_PROFILES_TABLE,
+        Item: profile
+    }));
+
+    return getUserDetail(userId);
 };
 
 const listPromos = async () => {
@@ -266,14 +739,33 @@ const updateOrderStatus = async (payload) => {
         throw new Error('Order not found.');
     }
 
-    const nextStatus = String(payload.status || existingOrder.status || 'PENDING').trim().toUpperCase();
-    const trackingNumber = buildTrackingNumber(orderId, String(payload.trackingNumber || existingOrder.trackingNumber || '').trim());
+    const previousStatus = normalizeOrderStatus(existingOrder.status);
+    const nextStatus = normalizeOrderStatus(payload.status || existingOrder.status || 'PENDING');
+    const trackingNumber = getTrackingNumberForStatus(orderId, nextStatus, String(payload.trackingNumber || existingOrder.trackingNumber || '').trim());
     const updatedAt = new Date().toISOString();
+    const currentlyCommitted = existingOrder.inventoryCommitted === true;
+    const shouldCommitInventory = nextStatus !== 'CANCELLED';
+    let refundMetadata = {};
+
+    if (nextStatus === 'CANCELLED' && previousStatus !== 'CANCELLED') {
+        refundMetadata = await refundOrderPayment(existingOrder);
+    }
+
+    if (currentlyCommitted && !shouldCommitInventory) {
+        await applyInventoryChange(existingOrder.items, 'release');
+    }
+
+    if (!currentlyCommitted && shouldCommitInventory) {
+        await applyInventoryChange(existingOrder.items, 'reserve');
+    }
+
     const updatedOrder = {
         ...existingOrder,
         status: nextStatus,
         trackingNumber,
         updatedAt,
+        inventoryCommitted: shouldCommitInventory,
+        ...refundMetadata,
         statusHistory: [
             ...(existingOrder.statusHistory || []),
             { status: nextStatus, updatedAt }
@@ -285,28 +777,9 @@ const updateOrderStatus = async (payload) => {
         Item: updatedOrder
     }));
 
-    if (updatedOrder.email) {
-        await sesClient.send(new SendEmailCommand({
-            Source: process.env.SES_FROM_ADDRESS,
-            Destination: { ToAddresses: [updatedOrder.email] },
-            Message: {
-                Subject: { Data: `ElectroTech order ${updatedOrder.orderId} is now ${nextStatus}` },
-                Body: {
-                    Html: { Data: buildStatusEmailHtml(updatedOrder) },
-                    Text: {
-                        Data: [
-                            `Order ${updatedOrder.orderId} status updated`,
-                            `Status: ${updatedOrder.status}`,
-                            `Tracking Number: ${updatedOrder.trackingNumber}`,
-                            `Order Total: ${formatCurrency(updatedOrder.total)}`
-                        ].join('\n')
-                    }
-                }
-            }
-        }));
-    }
+    await sendStatusEmail(updatedOrder);
 
-    return updatedOrder;
+    return serializeAdminOrder(updatedOrder);
 };
 
 exports.handler = async (event) => {
@@ -349,6 +822,10 @@ exports.handler = async (event) => {
                 };
             }
 
+            if (entity === 'user-detail') {
+                return { statusCode: 200, headers, body: JSON.stringify(await getUserDetail(String(event.queryStringParameters?.userId || '').trim())) };
+            }
+
             if (entity === 'promos') {
                 return { statusCode: 200, headers, body: JSON.stringify(await listPromos()) };
             }
@@ -384,6 +861,10 @@ exports.handler = async (event) => {
                 }
                 await demoteUser(payload.username);
                 return { statusCode: 200, headers, body: JSON.stringify({ message: 'Admin access removed.' }) };
+            }
+
+            if (entity === 'users' && action === 'save-profile') {
+                return { statusCode: 200, headers, body: JSON.stringify(await saveUserProfile(payload)) };
             }
 
             if (entity === 'orders' && action === 'update-status') {

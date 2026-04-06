@@ -1,7 +1,9 @@
-import { ShoppingCart } from 'lucide-react'
+import { ShoppingCart, Star } from 'lucide-react'
 
 export default function ProductCard({ product, onSelect, onAdd }) {
   const primaryImage = product.images?.[0] || product.imageUrl
+  const averageRating = Number(product.averageRating || 0)
+  const reviewCount = Number(product.reviewCount || 0)
 
   return (
     /* --- 1. THE CARD CONTAINER --- */
@@ -27,6 +29,16 @@ export default function ProductCard({ product, onSelect, onAdd }) {
         <h2 className="font-bold text-lg leading-tight mb-4 text-zinc-900">
           {product.name}
         </h2>
+
+        <div className="mb-4 flex items-center gap-2 text-zinc-500">
+          <div className="flex items-center gap-1 text-amber-500">
+            <Star size={14} fill={reviewCount > 0 ? 'currentColor' : 'none'} />
+            <span className="text-xs font-black text-zinc-800">{reviewCount > 0 ? averageRating.toFixed(1) : 'New'}</span>
+          </div>
+          <span className="text-[10px] font-black uppercase tracking-[0.18em] text-zinc-400">
+            {reviewCount > 0 ? `${reviewCount} review${reviewCount === 1 ? '' : 's'}` : 'No reviews yet'}
+          </span>
+        </div>
 
         {/* --- 5. ACTION ROW --- */}
         <div className="mt-auto flex justify-between items-center border-t border-zinc-100 pt-4">

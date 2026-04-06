@@ -44,7 +44,7 @@ export default function Home() {
   const [ordersError, setOrdersError] = useState('');
   const [isLoadingOrders, setIsLoadingOrders] = useState(false);
   const [isResendingOrder, setIsResendingOrder] = useState('');
-  const { products, isLoading, error } = useProducts();
+  const { products, isLoading, error, refreshProducts } = useProducts();
   const { cart, addToCart, removeFromCart, updateQty, clearCart, cartCount } = useCart(setShowCartDrawer);  
 
   /* --- 4. STRIPE SUCCESS DETECTION (POST-PAYMENT) --- */
@@ -192,6 +192,17 @@ export default function Home() {
     if (product) setSelectedProduct(product);
   };
 
+  useEffect(() => {
+    if (!selectedProduct) {
+      return;
+    }
+
+    const latestProduct = products.find((product) => product.productId === selectedProduct.productId);
+    if (latestProduct) {
+      setSelectedProduct(latestProduct);
+    }
+  }, [products, selectedProduct]);
+
   const filteredProducts = useMemo(() => {
     return products.filter(p => (
       (activeCategory.toLowerCase() === 'all' || p.category === activeCategory) &&
@@ -273,7 +284,13 @@ export default function Home() {
       </main>
 
       {/* MODALS & DRAWERS */}
-      <ProductModal product={selectedProduct} onClose={() => setSelectedProduct(null)} onAdd={addToCart} />
+      <ProductModal
+        product={selectedProduct}
+        user={authUser}
+        onClose={() => setSelectedProduct(null)}
+        onAdd={addToCart}
+        onReviewCreated={refreshProducts}
+      />
       <CartDrawer isOpen={showCartDrawer} cart={cart} user={authUser} onClose={() => setShowCartDrawer(false)} onRemove={removeFromCart} onClearCart={clearCart} onUpdateQty={updateQty}  />
       <OrdersDrawer
         isOpen={showOrdersDrawer}

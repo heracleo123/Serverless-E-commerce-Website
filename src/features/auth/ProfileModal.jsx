@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { BadgeCheck, Loader2, Mail, MapPin, Plus, Save, ShieldCheck, Trash2, User, X } from 'lucide-react';
+import { BadgeCheck, ImagePlus, Loader2, Mail, MapPin, Plus, Save, ShieldCheck, Trash2, User, X } from 'lucide-react';
 import { fetchAuthSession } from 'aws-amplify/auth';
 import { APP_CONFIG } from '../../constants/appConstants';
 
@@ -21,7 +21,7 @@ const isAdultBirthDate = (value) => {
 
 const createEmptyAddress = (index = 1) => ({
   id: `address-${Date.now()}-${index}`,
-  label: index === 1 ? 'Primary Address' : `Address ${index}`,
+  label: `Address ${index}`,
   fullName: '',
   line1: '',
   line2: '',
@@ -33,10 +33,26 @@ const createEmptyAddress = (index = 1) => ({
 
 const normalizeGroups = (groups) => (Array.isArray(groups) ? groups : []);
 
+const fileToDataUrl = (file) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve({
+    fileData: reader.result,
+    fileName: file.name,
+    fileType: file.type || 'image/jpeg',
+  });
+  reader.onerror = reject;
+  reader.readAsDataURL(file);
+});
+
 export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) {
   const [addresses, setAddresses] = useState([]);
   const [defaultAddressId, setDefaultAddressId] = useState('');
   const [birthDate, setBirthDate] = useState('');
+  const [username, setUsername] = useState('');
+  const [photoUrl, setPhotoUrl] = useState('');
+  const [photoFile, setPhotoFile] = useState(null);
+  const [photoPreviewUrl, setPhotoPreviewUrl] = useState('');
+  const [removePhoto, setRemovePhoto] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
@@ -89,6 +105,10 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
         setAddresses(nextAddresses);
         setDefaultAddressId(data.defaultAddressId || nextAddresses[0]?.id || '');
         setBirthDate(data.birthDate || '');
+        setUsername(data.username || data.displayName || '');
+        setPhotoUrl(data.photoUrl || '');
+        setPhotoFile(null);
+        setRemovePhoto(false);
       } catch (error) {
         console.error('Profile load failed:', error);
         setErrorMessage(error.message || 'Unable to load your saved addresses.');
@@ -99,6 +119,18 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
 
     loadProfile();
   }, [isOpen, user]);
+
+  useEffect(() => {
+    if (!photoFile) {
+      setPhotoPreviewUrl('');
+      return undefined;
+    }
+
+    const objectUrl = URL.createObjectURL(photoFile);
+    setPhotoPreviewUrl(objectUrl);
+
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [photoFile]);
 
   if (!isOpen || !user) {
     return null;
@@ -141,7 +173,7 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
       }
 
       const filteredAddresses = addresses.filter((address) => (
-        address.fullName.trim() && address.line1.trim() && address.city.trim() && address.province.trim() && address.postalCode.trim()
+        address.fullName.trim() && address.line2.trim() && address.line1.trim() && address.city.trim() && address.province.trim() && address.postalCode.trim()
       ));
 
       const session = await fetchAuthSession();
@@ -150,6 +182,8 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
       if (!token) {
         throw new Error('No valid session found.');
       }
+
+      const nextPhotoFile = photoFile ? await fileToDataUrl(photoFile) : null;
 
       const response = await fetch(`${APP_CONFIG.API_URL}/profile`, {
         method: 'PUT',
@@ -163,6 +197,9 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
             ? defaultAddressId
             : filteredAddresses[0]?.id || null,
           birthDate: birthDate || null,
+          username,
+          photoFile: nextPhotoFile,
+          removePhoto,
         }),
       });
 
@@ -175,6 +212,10 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
       setAddresses(data.addresses?.length ? data.addresses : []);
       setDefaultAddressId(data.defaultAddressId || data.addresses?.[0]?.id || '');
       setBirthDate(data.birthDate || '');
+      setUsername(data.username || data.displayName || '');
+      setPhotoUrl(data.photoUrl || '');
+      setPhotoFile(null);
+      setRemovePhoto(false);
       setSuccessMessage('Profile updated.');
       onProfileSaved?.(data);
     } catch (error) {
@@ -202,7 +243,13 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
           </button>
 
           <div className="mb-4 flex h-20 w-20 rotate-3 items-center justify-center rounded-3xl bg-rose-500 shadow-lg">
-            <User size={40} className="-rotate-3 text-white" />
+            {photoUrl && !removePhoto ? (
+              <img src={photoUrl} alt="Profile" className="h-20 w-20 rounded-3xl object-cover" />
+            ) : photoPreviewUrl ? (
+              <img src={photoPreviewUrl} alt="Profile preview" className="h-20 w-20 rounded-3xl object-cover" />
+            ) : (
+              <User size={40} className="-rotate-3 text-white" />
+            )}
           </div>
 
           <h2 className="text-3xl font-black uppercase italic tracking-tighter">Account Profile</h2>
@@ -245,6 +292,56 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
                 <p className="mt-2 text-sm font-bold text-zinc-900">
                   {hasValidAddress ? 'Default shipping address saved' : 'No address saved'}
                 </p>
+              </div>
+
+              <div className="rounded-2xl border border-zinc-100 bg-white p-4">
+                <p className="text-[10px] font-black uppercase tracking-[0.22em] text-rose-500">Public Identity</p>
+                <p className="mt-2 text-xs text-zinc-500">Your public name is a single unique handle used across your account and verified product reviews.</p>
+              </div>
+
+              <div className="rounded-2xl border border-zinc-100 bg-white p-4">
+                <div className="flex items-center gap-3 text-zinc-500">
+                  <User size={16} />
+                  <span className="text-[9px] font-black uppercase tracking-widest">Public Username</span>
+                </div>
+                <input
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value.toLowerCase())}
+                  placeholder="your.public.name"
+                  className="mt-3 w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-900 outline-none transition focus:border-rose-500"
+                />
+                <p className="mt-2 text-xs text-zinc-500">Use 3 to 24 lowercase letters, numbers, dots, dashes, or underscores.</p>
+              </div>
+
+              <div className="rounded-2xl border border-zinc-100 bg-white p-4">
+                <div className="flex items-center gap-3 text-zinc-500">
+                  <ImagePlus size={16} />
+                  <span className="text-[9px] font-black uppercase tracking-widest">Profile Photo</span>
+                </div>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(event) => {
+                    const nextFile = event.target.files?.[0] || null;
+                    setPhotoFile(nextFile);
+                    if (nextFile) {
+                      setRemovePhoto(false);
+                    }
+                  }}
+                  className="mt-3 block w-full text-xs font-medium text-zinc-500"
+                />
+                {(photoUrl || photoFile) ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPhotoFile(null);
+                      setRemovePhoto(true);
+                    }}
+                    className="mt-3 text-[10px] font-black uppercase tracking-[0.18em] text-rose-600"
+                  >
+                    Remove Photo
+                  </button>
+                ) : null}
               </div>
 
               <div className="rounded-2xl border border-zinc-100 bg-white p-4">
@@ -323,7 +420,6 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
                     </div>
 
                     <div className="grid gap-4 md:grid-cols-2">
-                      <input value={address.label} onChange={(event) => updateAddress(address.id, 'label', event.target.value)} placeholder="Label" className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-900 outline-none transition focus:border-rose-500" />
                       <input value={address.line2} onChange={(event) => updateAddress(address.id, 'line2', event.target.value)} placeholder="First name" className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-900 outline-none transition focus:border-rose-500" />
                       <input value={address.fullName} onChange={(event) => updateAddress(address.id, 'fullName', event.target.value)} placeholder="Last name" className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-900 outline-none transition focus:border-rose-500" />
                       <input value={address.line1} onChange={(event) => updateAddress(address.id, 'line1', event.target.value)} placeholder="Street address" className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-900 outline-none transition focus:border-rose-500 md:col-span-2" />
