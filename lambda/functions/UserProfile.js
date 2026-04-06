@@ -42,6 +42,8 @@ const normalizeBirthDate = (birthDate) => {
     return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : '';
 };
 
+const normalizeDisplayName = (displayName) => String(displayName || '').trim().slice(0, 50);
+
 const firstNonEmptyString = (...values) => {
     for (const value of values) {
         const normalized = String(value || '').trim();
@@ -61,7 +63,16 @@ const getPrimaryAddressFullName = (addresses) => {
 };
 
 const resolvePreferredDisplayName = ({ displayName, username, addresses, email, givenName, familyName, fullName }) => {
-    const explicitName = firstNonEmptyString(displayName, username);
+    const normalizedDisplayName = normalizeDisplayName(displayName);
+    const isLegacySlugDisplayName = Boolean(
+        normalizedDisplayName
+        && username
+        && normalizedDisplayName === username
+        && normalizedDisplayName === sanitizePublicName(normalizedDisplayName)
+    );
+    const explicitName = isLegacySlugDisplayName
+        ? ''
+        : firstNonEmptyString(normalizedDisplayName, username);
     if (explicitName) {
         return explicitName;
     }
@@ -254,7 +265,8 @@ exports.handler = async (event) => {
             const defaultAddressId = addresses.some((address) => address.id === payload.defaultAddressId)
                 ? payload.defaultAddressId
                 : addresses[0]?.id || null;
-            const username = normalizeUsername(payload.displayName ?? payload.username ?? existingProfile.displayName ?? existingProfile.username);
+            const displayName = normalizeDisplayName(payload.displayName);
+            const username = displayName ? normalizeUsername(displayName) : '';
 
             await ensureUniqueUsername(claims.sub, username);
 
@@ -268,7 +280,7 @@ exports.handler = async (event) => {
                 addresses,
                 defaultAddressId,
                 username,
-                displayName: username,
+                displayName,
                 photoUrl: payload.removePhoto ? '' : (uploadedPhotoUrl || existingProfile.photoUrl || ''),
                 birthDate: validateAdultBirthDate(payload.birthDate),
                 createdAt: existingProfile.createdAt || baseProfile.createdAt,

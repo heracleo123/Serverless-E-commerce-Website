@@ -33,6 +33,10 @@ const createEmptyAddress = (index = 1) => ({
 
 const normalizeGroups = (groups) => (Array.isArray(groups) ? groups : []);
 
+const firstNonEmptyString = (...values) => values.find((value) => String(value || '').trim()) || '';
+
+const joinNameParts = (...parts) => parts.map((part) => String(part || '').trim()).filter(Boolean).join(' ');
+
 const fileToDataUrl = (file) => new Promise((resolve, reject) => {
   const reader = new FileReader();
   reader.onload = () => resolve({
@@ -63,7 +67,13 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
   const groups = normalizeGroups(user?.signInUserSession?.accessToken?.payload?.['cognito:groups'] || user?.tokens?.accessToken?.payload?.['cognito:groups']);
   const isAdmin = groups.includes('Admins');
   const maxBirthDate = useMemo(() => getMaximumBirthDate(), []);
-  const resolvedDisplayName = displayName || email.split('@')[0] || 'Customer';
+  const fallbackDisplayName = useMemo(() => firstNonEmptyString(
+    joinNameParts(user?.attributes?.given_name, user?.attributes?.family_name),
+    user?.attributes?.name,
+    email.split('@')[0],
+    'Customer'
+  ), [email, user]);
+  const resolvedDisplayName = displayName || fallbackDisplayName;
 
   const hasValidAddress = useMemo(
     () => addresses.some((address) => address.fullName && address.line2 && address.line1 && address.city && address.province && address.postalCode),
@@ -253,8 +263,7 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
             )}
           </div>
 
-          <h2 className="text-3xl font-black uppercase italic tracking-tighter">Account Profile</h2>
-          <p className="mt-2 text-sm font-bold text-zinc-200">{resolvedDisplayName}</p>
+          <h2 className="text-3xl font-black tracking-tighter">Hello, {resolvedDisplayName}</h2>
           <div className="mt-2 flex flex-wrap gap-2">
             {isAdmin ? (
               <span className="flex items-center gap-1 rounded-full bg-rose-500 px-3 py-1 text-[9px] font-black uppercase tracking-widest">

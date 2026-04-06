@@ -141,7 +141,16 @@ const getPrimaryAddressFullName = (addresses) => {
 };
 
 const resolvePreferredDisplayName = ({ displayName, username, addresses, email, givenName, familyName, fullName }) => {
-    const explicitName = firstNonEmptyString(displayName, username);
+    const normalizedDisplayName = String(displayName || '').trim().slice(0, 50);
+    const isLegacySlugDisplayName = Boolean(
+        normalizedDisplayName
+        && username
+        && normalizedDisplayName === username
+        && normalizedDisplayName === sanitizePublicName(normalizedDisplayName)
+    );
+    const explicitName = isLegacySlugDisplayName
+        ? ''
+        : firstNonEmptyString(normalizedDisplayName, username);
     if (explicitName) {
         return explicitName;
     }
@@ -664,7 +673,8 @@ const saveUserProfile = async (payload) => {
     }));
 
     const existingProfile = existingProfileResult.Item || {};
-    const username = normalizeUsername(payload.profile?.displayName ?? payload.profile?.username ?? existingProfile.displayName ?? existingProfile.username);
+    const displayName = String(payload.profile?.displayName || '').trim().slice(0, 50);
+    const username = displayName ? normalizeUsername(displayName) : '';
     await ensureUniqueUsername(userId, username);
     const addresses = normalizeAddresses(payload.profile?.addresses);
     const defaultAddressId = addresses.some((address) => address.id === payload.profile?.defaultAddressId)
@@ -675,7 +685,7 @@ const saveUserProfile = async (payload) => {
         userId,
         email: String(payload.profile?.email || existingProfile.email || '').trim(),
         username,
-        displayName: username,
+        displayName,
         photoUrl: String(payload.profile?.photoUrl || existingProfile.photoUrl || '').trim(),
         addresses,
         defaultAddressId,

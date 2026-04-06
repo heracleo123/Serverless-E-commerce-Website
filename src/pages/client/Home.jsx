@@ -40,7 +40,7 @@ export default function Home() {
   const [showOrdersDrawer, setShowOrdersDrawer] = useState(false);
   const [orders, setOrders] = useState([]);
   const [showProfileModal, setShowProfileModal] = useState(false);
-  const [, setProfile] = useState(null);
+  const [profile, setProfile] = useState(null);
   const [ordersError, setOrdersError] = useState('');
   const [isLoadingOrders, setIsLoadingOrders] = useState(false);
   const [isResendingOrder, setIsResendingOrder] = useState('');
@@ -228,6 +228,7 @@ export default function Home() {
       <NavBar 
         cartCount={cartCount}
         authUser={authUser}
+        profile={profile}
         onSignOut={amplifySignOut}
         onOpenCart={() => setShowCartDrawer(true)}
         onOpenOrders={fetchOrders}

@@ -5,12 +5,22 @@ import { fetchAuthSession } from 'aws-amplify/auth';
 import { Link } from 'react-router-dom';
 
 
-export default function NavBar({ cartCount, authUser, onSignOut, onOpenCart, onOpenOrders, onOpenAuth, onOpenProfile}) {
+const firstNonEmptyString = (...values) => values.find((value) => String(value || '').trim()) || '';
+const joinNameParts = (...parts) => parts.map((part) => String(part || '').trim()).filter(Boolean).join(' ');
+
+export default function NavBar({ cartCount, authUser, profile, onSignOut, onOpenCart, onOpenOrders, onOpenAuth, onOpenProfile}) {
   const [isAdmin, setIsAdmin] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false); // Controls the menu
   const dropdownRef = useRef(null); // Helps close the menu if you click outside
 
   const userEmail = authUser?.signInDetails?.loginId || authUser?.attributes?.email || 'Member';
+  const displayName = firstNonEmptyString(
+    profile?.displayName,
+    joinNameParts(authUser?.attributes?.given_name, authUser?.attributes?.family_name),
+    authUser?.attributes?.name,
+    userEmail.split('@')[0],
+    'Member'
+  );
 
   // Check Admin Status
   useEffect(() => {
@@ -51,10 +61,10 @@ export default function NavBar({ cartCount, authUser, onSignOut, onOpenCart, onO
               className="flex items-center gap-3 bg-zinc-50 hover:bg-zinc-100 px-4 py-2 rounded-full border border-zinc-200 transition-all"
             >
               <div className="w-8 h-8 bg-zinc-900 rounded-full flex items-center justify-center text-white text-[10px] font-black">
-                {userEmail[0].toUpperCase()}
+                {displayName[0].toUpperCase()}
               </div>
               <span className="hidden md:block text-[10px] font-black uppercase tracking-tight text-zinc-900">
-                {userEmail.split('@')[0]}
+                {displayName}
               </span>
               <ChevronDown size={14} className={`transition-transform duration-300 ${showDropdown ? 'rotate-180' : ''}`} />
             </button>
@@ -64,7 +74,7 @@ export default function NavBar({ cartCount, authUser, onSignOut, onOpenCart, onO
               <div className="absolute right-0 mt-3 w-56 bg-white rounded-2xl shadow-2xl border border-zinc-100 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
                 <div className="p-4 border-b border-zinc-50">
                   <p className="text-[9px] font-bold text-zinc-400 uppercase tracking-widest">Logged in as</p>
-                  <p className="text-xs font-black truncate text-zinc-900">{userEmail}</p>
+                  <p className="text-xs font-black truncate text-zinc-900">{displayName}</p>
                 </div>
 
                 <div className="p-2">
