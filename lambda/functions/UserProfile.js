@@ -42,6 +42,43 @@ const normalizeBirthDate = (birthDate) => {
     return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : '';
 };
 
+const firstNonEmptyString = (...values) => {
+    for (const value of values) {
+        const normalized = String(value || '').trim();
+        if (normalized) {
+            return normalized;
+        }
+    }
+
+    return '';
+};
+
+const joinNameParts = (...parts) => firstNonEmptyString(parts.map((part) => String(part || '').trim()).filter(Boolean).join(' '));
+
+const getPrimaryAddressFullName = (addresses) => {
+    const primaryAddress = (Array.isArray(addresses) ? addresses : []).find((address) => String(address?.fullName || '').trim());
+    return String(primaryAddress?.fullName || '').trim();
+};
+
+const resolvePreferredDisplayName = ({ displayName, username, addresses, email, givenName, familyName, fullName }) => {
+    const explicitName = firstNonEmptyString(displayName, username);
+    if (explicitName) {
+        return explicitName;
+    }
+
+    const fallbackName = firstNonEmptyString(
+        joinNameParts(givenName, familyName),
+        fullName,
+        getPrimaryAddressFullName(addresses)
+    );
+
+    if (fallbackName) {
+        return fallbackName;
+    }
+
+    return firstNonEmptyString(String(email || '').split('@')[0]);
+};
+
 const sanitizePublicName = (value) => String(value || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
 
 const resolveStoredPublicName = (...values) => {
@@ -180,16 +217,27 @@ exports.handler = async (event) => {
                 Key: { userId: claims.sub }
             }));
 
+            const storedProfile = result.Item || {};
+            const resolvedDisplayName = resolvePreferredDisplayName({
+                displayName: storedProfile.displayName,
+                username: storedProfile.username,
+                addresses: storedProfile.addresses,
+                email: storedProfile.email || claims.email,
+                givenName: claims.given_name,
+                familyName: claims.family_name,
+                fullName: claims.name,
+            });
+
             return {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify({
                     ...baseProfile,
-                    ...(result.Item || {}),
-                    username: resolveStoredPublicName(result.Item?.username, result.Item?.displayName),
-                    displayName: resolveStoredPublicName(result.Item?.username, result.Item?.displayName),
-                    photoUrl: String(result.Item?.photoUrl || '').trim(),
-                    birthDate: normalizeBirthDate(result.Item?.birthDate)
+                    ...storedProfile,
+                    username: resolveStoredPublicName(storedProfile.username, storedProfile.displayName),
+                    displayName: resolvedDisplayName,
+                    photoUrl: String(storedProfile.photoUrl || '').trim(),
+                    birthDate: normalizeBirthDate(storedProfile.birthDate)
                 })
             };
         }
@@ -206,7 +254,7 @@ exports.handler = async (event) => {
             const defaultAddressId = addresses.some((address) => address.id === payload.defaultAddressId)
                 ? payload.defaultAddressId
                 : addresses[0]?.id || null;
-            const username = normalizeUsername(payload.username ?? payload.displayName ?? existingProfile.username ?? existingProfile.displayName);
+            const username = normalizeUsername(payload.displayName ?? payload.username ?? existingProfile.displayName ?? existingProfile.username);
 
             await ensureUniqueUsername(claims.sub, username);
 
@@ -232,10 +280,23 @@ exports.handler = async (event) => {
                 Item: profile
             }));
 
+            const responseProfile = {
+                ...profile,
+                displayName: resolvePreferredDisplayName({
+                    displayName: profile.displayName,
+                    username: profile.username,
+                    addresses: profile.addresses,
+                    email: profile.email || claims.email,
+                    givenName: claims.given_name,
+                    familyName: claims.family_name,
+                    fullName: claims.name,
+                })
+            };
+
             return {
                 statusCode: 200,
                 headers,
-                body: JSON.stringify(profile)
+                body: JSON.stringify(responseProfile)
             };
         }
 

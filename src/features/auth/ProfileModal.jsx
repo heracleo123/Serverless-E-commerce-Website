@@ -48,7 +48,7 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
   const [addresses, setAddresses] = useState([]);
   const [defaultAddressId, setDefaultAddressId] = useState('');
   const [birthDate, setBirthDate] = useState('');
-  const [username, setUsername] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [photoUrl, setPhotoUrl] = useState('');
   const [photoFile, setPhotoFile] = useState(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState('');
@@ -63,6 +63,7 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
   const groups = normalizeGroups(user?.signInUserSession?.accessToken?.payload?.['cognito:groups'] || user?.tokens?.accessToken?.payload?.['cognito:groups']);
   const isAdmin = groups.includes('Admins');
   const maxBirthDate = useMemo(() => getMaximumBirthDate(), []);
+  const resolvedDisplayName = displayName || email.split('@')[0] || 'Customer';
 
   const hasValidAddress = useMemo(
     () => addresses.some((address) => address.fullName && address.line2 && address.line1 && address.city && address.province && address.postalCode),
@@ -105,7 +106,7 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
         setAddresses(nextAddresses);
         setDefaultAddressId(data.defaultAddressId || nextAddresses[0]?.id || '');
         setBirthDate(data.birthDate || '');
-        setUsername(data.username || data.displayName || '');
+        setDisplayName(data.displayName || data.username || '');
         setPhotoUrl(data.photoUrl || '');
         setPhotoFile(null);
         setRemovePhoto(false);
@@ -197,7 +198,7 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
             ? defaultAddressId
             : filteredAddresses[0]?.id || null,
           birthDate: birthDate || null,
-          username,
+          displayName,
           photoFile: nextPhotoFile,
           removePhoto,
         }),
@@ -212,7 +213,7 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
       setAddresses(data.addresses?.length ? data.addresses : []);
       setDefaultAddressId(data.defaultAddressId || data.addresses?.[0]?.id || '');
       setBirthDate(data.birthDate || '');
-      setUsername(data.username || data.displayName || '');
+      setDisplayName(data.displayName || data.username || '');
       setPhotoUrl(data.photoUrl || '');
       setPhotoFile(null);
       setRemovePhoto(false);
@@ -253,6 +254,7 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
           </div>
 
           <h2 className="text-3xl font-black uppercase italic tracking-tighter">Account Profile</h2>
+          <p className="mt-2 text-sm font-bold text-zinc-200">{resolvedDisplayName}</p>
           <div className="mt-2 flex flex-wrap gap-2">
             {isAdmin ? (
               <span className="flex items-center gap-1 rounded-full bg-rose-500 px-3 py-1 text-[9px] font-black uppercase tracking-widest">
@@ -296,21 +298,21 @@ export default function ProfileModal({ isOpen, onClose, user, onProfileSaved }) 
 
               <div className="rounded-2xl border border-zinc-100 bg-white p-4">
                 <p className="text-[10px] font-black uppercase tracking-[0.22em] text-rose-500">Public Identity</p>
-                <p className="mt-2 text-xs text-zinc-500">Your public name is a single unique handle used across your account and verified product reviews.</p>
+                <p className="mt-2 text-xs text-zinc-500">Use one display name for your customer profile and reviews. If you leave it blank, we fall back to the name already available on your account.</p>
               </div>
 
               <div className="rounded-2xl border border-zinc-100 bg-white p-4">
                 <div className="flex items-center gap-3 text-zinc-500">
                   <User size={16} />
-                  <span className="text-[9px] font-black uppercase tracking-widest">Public Username</span>
+                  <span className="text-[9px] font-black uppercase tracking-widest">Display Name</span>
                 </div>
                 <input
-                  value={username}
-                  onChange={(event) => setUsername(event.target.value.toLowerCase())}
-                  placeholder="your.public.name"
+                  value={displayName}
+                  onChange={(event) => setDisplayName(event.target.value)}
+                  placeholder="Add a display name"
                   className="mt-3 w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-900 outline-none transition focus:border-rose-500"
                 />
-                <p className="mt-2 text-xs text-zinc-500">Use 3 to 24 lowercase letters, numbers, dots, dashes, or underscores.</p>
+                <p className="mt-2 text-xs text-zinc-500">This is the single public name shown on your profile and verified product reviews.</p>
               </div>
 
               <div className="rounded-2xl border border-zinc-100 bg-white p-4">

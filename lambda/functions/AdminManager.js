@@ -122,6 +122,43 @@ const resolveStoredPublicName = (...values) => {
     return '';
 };
 
+const firstNonEmptyString = (...values) => {
+    for (const value of values) {
+        const normalized = String(value || '').trim();
+        if (normalized) {
+            return normalized;
+        }
+    }
+
+    return '';
+};
+
+const joinNameParts = (...parts) => firstNonEmptyString(parts.map((part) => String(part || '').trim()).filter(Boolean).join(' '));
+
+const getPrimaryAddressFullName = (addresses) => {
+    const primaryAddress = (Array.isArray(addresses) ? addresses : []).find((address) => String(address?.fullName || '').trim());
+    return String(primaryAddress?.fullName || '').trim();
+};
+
+const resolvePreferredDisplayName = ({ displayName, username, addresses, email, givenName, familyName, fullName }) => {
+    const explicitName = firstNonEmptyString(displayName, username);
+    if (explicitName) {
+        return explicitName;
+    }
+
+    const fallbackName = firstNonEmptyString(
+        joinNameParts(givenName, familyName),
+        fullName,
+        getPrimaryAddressFullName(addresses)
+    );
+
+    if (fallbackName) {
+        return fallbackName;
+    }
+
+    return firstNonEmptyString(String(email || '').split('@')[0]);
+};
+
 const normalizeBirthDate = (birthDate) => {
     const normalized = String(birthDate || '').trim();
     return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : '';
@@ -157,8 +194,6 @@ const normalizeUsername = (username) => {
 
     return normalized;
 };
-
-const normalizeDisplayName = (displayName) => String(displayName || '').trim().slice(0, 50);
 
 const normalizeAddresses = (addresses) => {
     return (Array.isArray(addresses) ? addresses : [])
@@ -511,6 +546,9 @@ const listUsers = async () => {
         }));
 
         const emailAttribute = (user.Attributes || []).find((attribute) => attribute.Name === 'email');
+        const givenNameAttribute = (user.Attributes || []).find((attribute) => attribute.Name === 'given_name');
+        const familyNameAttribute = (user.Attributes || []).find((attribute) => attribute.Name === 'family_name');
+        const nameAttribute = (user.Attributes || []).find((attribute) => attribute.Name === 'name');
         const subAttribute = (user.Attributes || []).find((attribute) => attribute.Name === 'sub');
         const profile = profilesByUserId.get(subAttribute?.Value || '') || {};
         const orderSummary = orderSummaryByUserId.get(subAttribute?.Value || '') || { orderCount: 0, lifetimeSpend: 0, lastOrderAt: '' };
@@ -525,7 +563,15 @@ const listUsers = async () => {
             isAdmin: (groupsResult.Groups || []).some((group) => group.GroupName === 'Admins'),
             profile: {
                 username: resolveStoredPublicName(profile.username, profile.displayName),
-                displayName: resolveStoredPublicName(profile.username, profile.displayName),
+                displayName: resolvePreferredDisplayName({
+                    displayName: profile.displayName,
+                    username: profile.username,
+                    addresses: profile.addresses,
+                    email: emailAttribute?.Value || '',
+                    givenName: givenNameAttribute?.Value || '',
+                    familyName: familyNameAttribute?.Value || '',
+                    fullName: nameAttribute?.Value || '',
+                }),
                 photoUrl: String(profile.photoUrl || '').trim(),
                 birthDate: normalizeBirthDate(profile.birthDate),
                 addressCount: Array.isArray(profile.addresses) ? profile.addresses.length : 0,
@@ -589,7 +635,12 @@ const getUserDetail = async (userId) => {
             userId,
             email: String(profileResult.Item?.email || '').trim(),
             username: resolveStoredPublicName(profileResult.Item?.username, profileResult.Item?.displayName),
-            displayName: resolveStoredPublicName(profileResult.Item?.username, profileResult.Item?.displayName),
+            displayName: resolvePreferredDisplayName({
+                displayName: profileResult.Item?.displayName,
+                username: profileResult.Item?.username,
+                addresses: profileResult.Item?.addresses,
+                email: profileResult.Item?.email,
+            }),
             photoUrl: String(profileResult.Item?.photoUrl || '').trim(),
             birthDate: normalizeBirthDate(profileResult.Item?.birthDate),
             addresses: Array.isArray(profileResult.Item?.addresses) ? profileResult.Item.addresses : [],
@@ -613,7 +664,7 @@ const saveUserProfile = async (payload) => {
     }));
 
     const existingProfile = existingProfileResult.Item || {};
-    const username = normalizeUsername(payload.profile?.username ?? payload.profile?.displayName ?? existingProfile.username ?? existingProfile.displayName);
+    const username = normalizeUsername(payload.profile?.displayName ?? payload.profile?.username ?? existingProfile.displayName ?? existingProfile.username);
     await ensureUniqueUsername(userId, username);
     const addresses = normalizeAddresses(payload.profile?.addresses);
     const defaultAddressId = addresses.some((address) => address.id === payload.profile?.defaultAddressId)

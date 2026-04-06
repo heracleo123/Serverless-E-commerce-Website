@@ -21,7 +21,7 @@ const formatCurrency = (value) => new Intl.NumberFormat('en-CA', {
 export default function AdminUserModal({ isOpen, user, detail, isLoading, isSaving, onClose, onSave }) {
   const [draft, setDraft] = useState({
     email: '',
-    username: '',
+    displayName: '',
     photoUrl: '',
     birthDate: '',
     addresses: [],
@@ -35,7 +35,7 @@ export default function AdminUserModal({ isOpen, user, detail, isLoading, isSavi
 
     setDraft({
       email: detail.profile.email || user?.email || '',
-      username: detail.profile.username || '',
+      displayName: detail.profile.displayName || detail.profile.username || '',
       photoUrl: detail.profile.photoUrl || '',
       birthDate: detail.profile.birthDate || '',
       addresses: Array.isArray(detail.profile.addresses) ? detail.profile.addresses : [],
@@ -79,9 +79,19 @@ export default function AdminUserModal({ isOpen, user, detail, isLoading, isSavi
       <div className="absolute inset-0 bg-zinc-900/60 backdrop-blur-sm" onClick={onClose} />
       <div className="relative max-h-[92vh] w-full max-w-6xl overflow-hidden rounded-[2.5rem] bg-white shadow-2xl">
         <div className="flex items-start justify-between bg-zinc-900 p-8 text-white">
-          <div>
+          <div className="flex items-center gap-4">
+            <div className="flex h-20 w-20 items-center justify-center overflow-hidden rounded-3xl bg-rose-500/90 shadow-lg">
+              {draft.photoUrl ? (
+                <img src={draft.photoUrl} alt="Customer profile" className="h-full w-full object-cover" />
+              ) : (
+                <User size={34} className="text-white" />
+              )}
+            </div>
+            <div>
             <p className="text-[10px] font-black uppercase tracking-[0.22em] text-rose-400">Customer Profile</p>
-            <h2 className="mt-2 text-3xl font-black uppercase italic tracking-tighter">{user?.email || user?.username}</h2>
+            <h2 className="mt-2 text-3xl font-black uppercase italic tracking-tighter">{detail?.profile?.displayName || draft.displayName || user?.email || user?.username}</h2>
+            <p className="mt-2 text-sm font-bold text-zinc-300">{user?.email || draft.email}</p>
+            </div>
           </div>
           <button type="button" onClick={onClose} className="rounded-full p-2 transition hover:bg-white/10">
             <X size={20} />
@@ -112,14 +122,14 @@ export default function AdminUserModal({ isOpen, user, detail, isLoading, isSavi
                 <div className="rounded-2xl border border-zinc-100 bg-white p-4">
                   <div className="flex items-center gap-3 text-zinc-500">
                     <User size={16} />
-                    <span className="text-[9px] font-black uppercase tracking-widest">Public Username</span>
+                    <span className="text-[9px] font-black uppercase tracking-widest">Display Name</span>
                   </div>
                   <input
-                    value={draft.username}
-                    onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value.toLowerCase() }))}
+                    value={draft.displayName}
+                    onChange={(event) => setDraft((current) => ({ ...current, displayName: event.target.value }))}
                     className="mt-3 w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-900 outline-none transition focus:border-rose-500"
                   />
-                  <p className="mt-2 text-xs text-zinc-500">This single unique name is what customers see on reviews and profile details.</p>
+                  <p className="mt-2 text-xs text-zinc-500">This is the single public name shown on the customer profile and reviews.</p>
                 </div>
 
                 <div className="rounded-2xl border border-zinc-100 bg-white p-4">
@@ -220,11 +230,15 @@ export default function AdminUserModal({ isOpen, user, detail, isLoading, isSavi
                     <div key={`${order.orderId}:${order.createdAt}`} className="rounded-3xl border border-zinc-100 bg-zinc-50 p-5">
                       <div className="flex items-start justify-between gap-4">
                         <div>
-                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">{order.orderId}</p>
+                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Order Number</p>
+                          <p className="mt-2 text-sm font-black text-zinc-900">{order.orderNumber || order.orderId}</p>
                           <p className="mt-2 text-sm font-black text-zinc-900">{order.status}</p>
                           <p className="mt-1 text-xs text-zinc-500">{order.createdAt ? new Date(order.createdAt).toLocaleString() : 'Recent'}</p>
                           {order.trackingNumber ? (
                             <p className="mt-2 text-[11px] font-black uppercase tracking-[0.16em] text-rose-600">Tracking {order.trackingNumber}</p>
+                          ) : null}
+                          {order.refundReference || order.refundId ? (
+                            <p className="mt-2 text-[11px] font-black uppercase tracking-[0.16em] text-zinc-500">Refund Ref {order.refundReference || order.refundId}</p>
                           ) : null}
                         </div>
                         <p className="text-lg font-black text-zinc-900">{formatCurrency(order.total)}</p>
