@@ -1,6 +1,10 @@
 $ErrorActionPreference = 'Stop'
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+param(
+    [string]$TerraformDirectory = (Split-Path -Parent $MyInvocation.MyCommand.Path)
+)
+
+$scriptDir = (Resolve-Path $TerraformDirectory).Path
 $tfvarsPath = Join-Path $scriptDir 'terraform.tfvars'
 $templatePath = Join-Path $scriptDir 'terraform.tfvars.example'
 
@@ -31,6 +35,7 @@ function Read-RequiredValue {
 
 Write-Host 'ElectroTech Terraform setup' -ForegroundColor Cyan
 Write-Host 'This will create or overwrite terraform.tfvars.' -ForegroundColor Yellow
+Write-Host "Terraform directory: $scriptDir" -ForegroundColor DarkGray
 Write-Host ''
 
 if ((Test-Path $tfvarsPath) -and -not (Test-Path $templatePath)) {
@@ -38,8 +43,7 @@ if ((Test-Path $tfvarsPath) -and -not (Test-Path $templatePath)) {
 }
 
 $awsRegion = Read-RequiredValue 'AWS region' 'us-east-1'
-$frontendUrl = Read-RequiredValue 'Frontend URL'
-$sesFromAddress = Read-RequiredValue 'SES verified sender email'
+$sesFromAddress = Read-RequiredValue 'SES verified sender email (personal email is fine for setup)'
 $lambdaPackageDir = Read-RequiredValue 'Lambda package directory' 'packages'
 $adminEmail = Read-RequiredValue 'Default admin email'
 $stripeSecretKey = Read-RequiredValue 'Stripe secret key'
@@ -47,7 +51,6 @@ $stripeWebhookSecret = Read-RequiredValue 'Stripe webhook signing secret'
 
 $tfvarsContent = @"
 aws_region             = "$awsRegion"
-frontend_url           = "$frontendUrl"
 ses_from_address       = "$sesFromAddress"
 lambda_pkg_dir         = "$lambdaPackageDir"
 admin_email            = "$adminEmail"
@@ -59,4 +62,5 @@ Set-Content -Path $tfvarsPath -Value $tfvarsContent -Encoding ascii
 
 Write-Host ''
 Write-Host "Wrote $tfvarsPath" -ForegroundColor Green
-Write-Host 'Review the file, then run terraform init and terraform apply.' -ForegroundColor Green
+Write-Host 'Terraform will provision the CloudFront frontend URL during apply, so no frontend URL is required during setup.' -ForegroundColor Green
+Write-Host 'Review the file, then run terraform init and terraform apply from this Terraform directory.' -ForegroundColor Green

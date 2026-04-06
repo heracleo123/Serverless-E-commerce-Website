@@ -13,6 +13,7 @@ It deploys:
 - Terraform v1.3+ installed
 - `node`/`npm` installed in the repo root
 - Your Stripe secret key and Stripe webhook signing secret ready before first deploy
+- A sender email address you can verify in SES during setup
 
 ## Before running
 1. Run `npm install` in the repository root so the build and packaging steps have their dependencies.
@@ -27,16 +28,16 @@ It deploys:
 Run the setup script once per environment:
 
 ```powershell
-cd c:\Users\mrelb\CAA900-Capstone\terraform
-powershell .\setup-terraform.ps1
+Set-Location .\terraform
+powershell -File .\setup-terraform.ps1
 ```
 
-The script prompts for the required deployment values and writes them to `terraform.tfvars`.
+The script uses the Terraform folder it is run from, so the repo can live on any drive. It prompts for the required deployment values and writes them to `terraform.tfvars`.
 
 You can use the helper script:
 ```powershell
-cd c:\Users\mrelb\CAA900-Capstone\terraform
-powershell .\package-lambdas.ps1
+Set-Location .\terraform
+powershell -File .\package-lambdas.ps1
 ```
 
 > Note: If you depend on external npm modules (`@aws-sdk`, `stripe`), produce bundles with those deps included.
@@ -59,16 +60,18 @@ Example `terraform.tfvars`:
 aws_region            = "us-east-1"
 stripe_secret_key     = "sk_live_xxx"
 stripe_webhook_secret = "whsec_xxx"
-frontend_url          = "https://your-app.example.com"
-ses_from_address      = "verified@yourdomain.com"
+ses_from_address      = "your-verified-email@example.com"
 lambda_pkg_dir        = "packages"
 admin_email           = "admin@example.com"
 ```
+
+`frontend_url` is no longer required before the first apply. Terraform provisions CloudFront and uses that generated URL for the deployed frontend and Lambda redirect environment.
 
 > Note: `terraform.tfvars` is gitignored—never commit sensitive values.
 
 ## After deploy
 - Check output URLs:
+  - `cloudfront_url`
   - `api_invoke_url`
   - `products_api_url`
   - `orders_api_url`

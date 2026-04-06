@@ -234,8 +234,8 @@ resource "aws_cognito_user_pool_client" "capstone_client" {
   allowed_oauth_flows            = ["code", "implicit"]
   allowed_oauth_scopes           = ["phone", "email", "openid", "profile"]
   allowed_oauth_flows_user_pool_client = true
-  callback_urls                  = ["${var.frontend_url}/admin", "http://localhost:5173/admin"]
-  logout_urls                    = ["${var.frontend_url}/logout", "http://localhost:5173/logout"]
+  callback_urls                  = ["https://${aws_cloudfront_distribution.frontend.domain_name}/admin", "http://localhost:5173/admin"]
+  logout_urls                    = ["https://${aws_cloudfront_distribution.frontend.domain_name}/logout", "http://localhost:5173/logout"]
 }
 
 # Create "Admins" group for ProductManager access
@@ -487,7 +487,7 @@ resource "aws_lambda_function" "functions" {
         ORDERS_TABLE   = aws_dynamodb_table.orders.name
         PROMO_CODES_TABLE  = aws_dynamodb_table.promo_codes.name
         USER_PROFILES_TABLE = aws_dynamodb_table.user_profiles.name
-        FRONTEND_URL   = var.frontend_url
+        FRONTEND_URL   = "https://${aws_cloudfront_distribution.frontend.domain_name}"
         CDN_URL        = "https://${aws_cloudfront_distribution.frontend.domain_name}"
         S3_BUCKET      = aws_s3_bucket.frontend.bucket
         SES_FROM_ADDRESS = var.ses_from_address
