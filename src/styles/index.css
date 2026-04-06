@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #e11d48;
+  --color-primary-hover: #be123c;
+}
+
+/* --- UI COMPONENT UTILITIES --- */
+
+@utility product-card {
+  @apply bg-white border border-zinc-200 rounded-2xl overflow-hidden 
+         transition-all p-4 shadow-sm flex flex-col min-h-[420px] relative;
+  
+  /* Manual hover fix since variables might be failing */
+  &:hover {
+    border-color: #e11d48 !important;
+    box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1);
+  }
+}
+
+@utility btn-primary {
+  @apply bg-[#e11d48] text-white px-10 py-4 
+         rounded-xl font-black transition-all shadow-lg
+         uppercase tracking-widest text-xs;
+  
+  &:hover {
+    background-color: #be123c !important;
+  }
+}
+
+/* Ensure the button is visible and high-contrast */
+.cart-button-fixed {
+  background-color: #18181b !important; /* Zinc 900 */
+  color: white !important;
+  padding: 12px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.cart-button-fixed:hover {
+  background-color: #e11d48 !important;
+}
+
+@utility heading-hero {
+  @apply text-5xl font-black mb-2 uppercase italic tracking-tighter text-zinc-900;
+}
+
+@utility no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
+}
+
+body {
+  @apply bg-white text-zinc-900 antialiased;
+}
+
+:root {
+  --color-primary: #e11d48; /* The red color in your logo */
+}

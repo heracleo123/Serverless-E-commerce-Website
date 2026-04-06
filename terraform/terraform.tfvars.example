@@ -1,0 +1,7 @@
+aws_region             = "us-east-1"
+frontend_url           = "https://your-domain.example"
+ses_from_address       = "no-reply@electrotech.com"
+lambda_pkg_dir         = "packages"
+admin_email            = "admin@electrotech.com"
+stripe_secret_key      = "sk_test_your_secret_key"
+stripe_webhook_secret  = "whsec_your_webhook_secret"
