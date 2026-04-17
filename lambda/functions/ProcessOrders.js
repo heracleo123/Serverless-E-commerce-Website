@@ -15,6 +15,35 @@ const headers = {
 
 const roundCurrency = (amount) => Math.round(Number(amount || 0) * 100) / 100;
 
+const formatPromoDate = (value) => new Date(value).toLocaleDateString('en-CA', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+});
+
+const getPromoAvailability = (promo) => {
+    if (!promo || promo.isActive === false) {
+        return { available: false, message: 'Promo code is invalid or inactive.' };
+    }
+
+    const now = Date.now();
+    const startsAt = promo.startsAt ? new Date(promo.startsAt).getTime() : null;
+    const expiresAt = promo.expiresAt ? new Date(promo.expiresAt).getTime() : null;
+
+    if (startsAt && startsAt > now) {
+        return {
+            available: false,
+            message: `Promo code becomes active on ${formatPromoDate(promo.startsAt)}.`
+        };
+    }
+
+    if (expiresAt && expiresAt < now) {
+        return { available: false, message: 'Promo code has expired.' };
+    }
+
+    return { available: true, message: '' };
+};
+
 const normalizeRequestedItems = (items) => {
     const itemMap = new Map();
 
@@ -70,7 +99,7 @@ const getAuthoritativeItems = async (requestedItems) => {
 };
 
 const calculateDiscount = (items, promo) => {
-    if (!promo || promo.isActive === false || (promo.expiresAt && new Date(promo.expiresAt).getTime() < Date.now())) {
+    if (!getPromoAvailability(promo).available) {
         return null;
     }
 
@@ -240,11 +269,13 @@ exports.handler = async (event) => {
                 Key: { code: promoCode }
             }));
 
-            if (!promoResult.Item || promoResult.Item.isActive === false) {
+            const availability = getPromoAvailability(promoResult.Item);
+
+            if (!promoResult.Item || !availability.available) {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ message: 'Promo code is invalid or inactive.' })
+                    body: JSON.stringify({ message: availability.message || 'Promo code is invalid or inactive.' })
                 };
             }
 

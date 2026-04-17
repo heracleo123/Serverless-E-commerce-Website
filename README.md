@@ -1,4 +1,4 @@
-# ElectroTech Capstone
+# ElectroTech Capstone Project
 
 ElectroTech is a full-stack e-commerce capstone built with React and Vite on the frontend and an AWS serverless backend provisioned through Terraform. The application supports product browsing, secure checkout with Stripe, profile management, reviews, promo codes, admin order management, refund handling, and status-based customer notifications.
 

@@ -73,11 +73,61 @@ const isPromoActive = (promo) => {
         return false;
     }
 
+    if (promo.startsAt && new Date(promo.startsAt).getTime() > Date.now()) {
+        return false;
+    }
+
     if (!promo.expiresAt) {
         return true;
     }
 
     return new Date(promo.expiresAt).getTime() >= Date.now();
+};
+
+const getPromoAvailabilityStatus = (promo) => {
+    if (!promo || promo.isActive === false) {
+        return 'inactive';
+    }
+
+    const now = Date.now();
+    const startsAt = promo.startsAt ? new Date(promo.startsAt).getTime() : null;
+    const expiresAt = promo.expiresAt ? new Date(promo.expiresAt).getTime() : null;
+
+    if (startsAt && startsAt > now) {
+        return 'scheduled';
+    }
+
+    if (expiresAt && expiresAt < now) {
+        return 'expired';
+    }
+
+    return 'active';
+};
+
+const toPromoStartOfDay = (value) => {
+    if (!value) {
+        return null;
+    }
+
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    if (Number.isNaN(parsed.getTime())) {
+        throw new Error('Promo start date is invalid.');
+    }
+
+    return parsed.toISOString();
+};
+
+const toPromoEndOfDay = (value) => {
+    if (!value) {
+        return null;
+    }
+
+    const parsed = new Date(`${value}T23:59:59.999Z`);
+    if (Number.isNaN(parsed.getTime())) {
+        throw new Error('Promo end date is invalid.');
+    }
+
+    return parsed.toISOString();
 };
 
 const getSuperAdminIdentity = () => String(process.env.SUPERADMIN_EMAIL || '').trim().toLowerCase();
@@ -710,7 +760,8 @@ const listPromos = async () => {
     return (result.Items || [])
         .map((promo) => ({
             ...promo,
-            isCurrentlyAvailable: isPromoActive(promo)
+            isCurrentlyAvailable: isPromoActive(promo),
+            availabilityStatus: getPromoAvailabilityStatus(promo)
         }))
         .sort((left, right) => String(left.code || '').localeCompare(String(right.code || '')));
 };
@@ -728,6 +779,13 @@ const savePromo = async (promoInput) => {
         throw new Error(`A ${targetType} target value is required.`);
     }
 
+    const startsAt = toPromoStartOfDay(promoInput.startsAt);
+    const expiresAt = toPromoEndOfDay(promoInput.expiresAt);
+
+    if (startsAt && expiresAt && new Date(startsAt).getTime() > new Date(expiresAt).getTime()) {
+        throw new Error('Promo end date must be on or after the start date.');
+    }
+
     const now = new Date().toISOString();
     const existingPromo = await docClient.send(new GetCommand({
         TableName: process.env.PROMO_CODES_TABLE,
@@ -742,7 +800,8 @@ const savePromo = async (promoInput) => {
         targetType,
         targetValue: targetType === 'all' ? '' : targetValue,
         isActive: promoInput.isActive !== false,
-        expiresAt: promoInput.expiresAt ? new Date(`${promoInput.expiresAt}T23:59:59.999Z`).toISOString() : null,
+        startsAt,
+        expiresAt,
         updatedAt: now,
         createdAt: existingPromo.Item?.createdAt || now
     };

@@ -10,16 +10,37 @@ const headers = {
     "Access-Control-Allow-Headers": "Content-Type,Authorization"
 };
 
-const isPromoAvailable = (promo) => {
+const formatPromoDate = (value) => new Date(value).toLocaleDateString('en-CA', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+});
+
+const getPromoAvailability = (promo) => {
     if (!promo || promo.isActive === false) {
-        return false;
+        return { available: false, message: 'Promo code is inactive.' };
     }
 
-    if (!promo.expiresAt) {
-        return true;
+    const now = Date.now();
+    const startsAt = promo.startsAt ? new Date(promo.startsAt).getTime() : null;
+    const expiresAt = promo.expiresAt ? new Date(promo.expiresAt).getTime() : null;
+
+    if (startsAt && startsAt > now) {
+        return {
+            available: false,
+            message: `Promo code becomes active on ${formatPromoDate(promo.startsAt)}.`
+        };
     }
 
-    return new Date(promo.expiresAt).getTime() >= Date.now();
+    if (expiresAt && expiresAt < now) {
+        return { available: false, message: 'Promo code has expired.' };
+    }
+
+    return { available: true, message: '' };
+};
+
+const isPromoAvailable = (promo) => {
+    return getPromoAvailability(promo).available;
 };
 
 exports.handler = async (event) => {
@@ -43,11 +64,21 @@ exports.handler = async (event) => {
             Key: { code }
         }));
 
-        if (!result.Item || !isPromoAvailable(result.Item)) {
+        const availability = getPromoAvailability(result.Item);
+
+        if (!result.Item) {
             return {
                 statusCode: 404,
                 headers,
                 body: JSON.stringify({ message: 'Promo code not found.' })
+            };
+        }
+
+        if (!availability.available) {
+            return {
+                statusCode: 404,
+                headers,
+                body: JSON.stringify({ message: availability.message || 'Promo code not found.' })
             };
         }
 

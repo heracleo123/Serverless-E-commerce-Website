@@ -30,7 +30,30 @@ const DEFAULT_PROMO_FORM = {
   targetType: 'all',
   targetValue: '',
   isActive: true,
+  startsAt: '',
   expiresAt: '',
+};
+
+const formatPromoSchedule = (promo) => {
+  const startLabel = promo.startsAt ? new Date(promo.startsAt).toLocaleDateString() : 'Now';
+  const endLabel = promo.expiresAt ? new Date(promo.expiresAt).toLocaleDateString() : 'No end date';
+  return `${startLabel} - ${endLabel}`;
+};
+
+const getPromoStatusLabel = (promo) => {
+  if (promo.isActive === false || promo.availabilityStatus === 'inactive') {
+    return { label: 'Inactive', className: 'text-zinc-400' };
+  }
+
+  if (promo.availabilityStatus === 'scheduled') {
+    return { label: 'Scheduled', className: 'text-amber-600' };
+  }
+
+  if (promo.availabilityStatus === 'expired') {
+    return { label: 'Expired', className: 'text-zinc-400' };
+  }
+
+  return { label: 'Active', className: 'text-emerald-600' };
 };
 
 export default function AdminDashboard() {
@@ -274,6 +297,7 @@ export default function AdminDashboard() {
       targetType: promo.targetType || 'all',
       targetValue: promo.targetValue || '',
       isActive: promo.isActive !== false,
+      startsAt: promo.startsAt ? String(promo.startsAt).slice(0, 10) : '',
       expiresAt: promo.expiresAt ? String(promo.expiresAt).slice(0, 10) : '',
     });
   };
@@ -291,6 +315,11 @@ export default function AdminDashboard() {
       return;
     }
 
+    if (promoForm.startsAt && promoForm.expiresAt && promoForm.startsAt > promoForm.expiresAt) {
+      showToast('Promo end date must be on or after the start date.', 'error');
+      return;
+    }
+
     try {
       await postAdminAction({
         entity: 'promos',
@@ -300,6 +329,7 @@ export default function AdminDashboard() {
           code: promoForm.code.trim().toUpperCase(),
           discountValue: Number(promoForm.discountValue || 0),
           targetValue: normalizedTargetValue,
+          startsAt: promoForm.startsAt || null,
           expiresAt: promoForm.expiresAt || null,
         },
       });
@@ -536,17 +566,29 @@ export default function AdminDashboard() {
                     <input value={promoForm.targetValue} onChange={(event) => setPromoForm((current) => ({ ...current, targetValue: event.target.value }))} placeholder={promoForm.targetType === 'product' ? 'Product ID' : 'Not required'} className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm font-medium outline-none" disabled={promoForm.targetType === 'all'} />
                   )}
                 </div>
-                <div className="grid gap-4 md:grid-cols-[1fr_0.9fr]">
+                <div className={`grid gap-4 ${editingPromoCode ? 'md:grid-cols-[1fr_1fr_1fr]' : 'md:grid-cols-2'}`}>
+                  {editingPromoCode ? (
+                    <label className="flex items-center gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm font-bold text-zinc-700">
+                      <input type="checkbox" checked={promoForm.isActive} onChange={(event) => setPromoForm((current) => ({ ...current, isActive: event.target.checked }))} className="h-4 w-4 accent-rose-500" />
+                      Promo is active
+                    </label>
+                  ) : null}
                   <label className="flex items-center gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm font-bold text-zinc-700">
-                    <input type="checkbox" checked={promoForm.isActive} onChange={(event) => setPromoForm((current) => ({ ...current, isActive: event.target.checked }))} className="h-4 w-4 accent-rose-500" />
-                    Promo is active
+                    <Calendar size={16} className="text-zinc-400" />
+                    <div className="w-full">
+                      <p className="text-[10px] font-black uppercase tracking-[0.18em] text-zinc-400">Start date</p>
+                      <input type="date" value={promoForm.startsAt} onChange={(event) => setPromoForm((current) => ({ ...current, startsAt: event.target.value }))} className="w-full bg-transparent text-sm font-medium outline-none" />
+                    </div>
                   </label>
                   <label className="flex items-center gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm font-bold text-zinc-700">
                     <Calendar size={16} className="text-zinc-400" />
-                    <input type="date" value={promoForm.expiresAt} onChange={(event) => setPromoForm((current) => ({ ...current, expiresAt: event.target.value }))} className="w-full bg-transparent text-sm font-medium outline-none" />
+                    <div className="w-full">
+                      <p className="text-[10px] font-black uppercase tracking-[0.18em] text-zinc-400">End date</p>
+                      <input type="date" value={promoForm.expiresAt} onChange={(event) => setPromoForm((current) => ({ ...current, expiresAt: event.target.value }))} className="w-full bg-transparent text-sm font-medium outline-none" />
+                    </div>
                   </label>
                 </div>
-                <p className="text-xs text-zinc-500">Leave the date empty for an ongoing promo, or set a final active day.</p>
+                <p className="text-xs text-zinc-500">Set both dates for a birthday or one-day promo, or leave the end date empty for an ongoing campaign.</p>
                 <div className="flex gap-3">
                   <button onClick={handleSavePromo} className="rounded-2xl bg-zinc-900 px-5 py-4 text-[10px] font-black uppercase tracking-[0.2em] text-white transition hover:bg-rose-600">{editingPromoCode ? 'Update Promo' : 'Save Promo'}</button>
                   <button onClick={resetPromoForm} className="rounded-2xl border border-zinc-200 px-5 py-4 text-[10px] font-black uppercase tracking-[0.2em] text-zinc-600 transition hover:border-zinc-300">Clear</button>
@@ -557,18 +599,21 @@ export default function AdminDashboard() {
             <section className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-xl">
               <p className="text-[10px] font-black uppercase tracking-[0.25em] text-rose-500">Saved Promos</p>
               <div className="mt-5 space-y-4">
-                {promos.map((promo) => (
+                {promos.map((promo) => {
+                  const status = getPromoStatusLabel(promo);
+
+                  return (
                   <div key={promo.code} className="rounded-3xl border border-zinc-100 bg-zinc-50 p-5">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <p className="text-sm font-black text-zinc-900">{promo.code}</p>
                         <p className="mt-1 text-sm text-zinc-500">{promo.description || 'No description provided.'}</p>
                         <p className="mt-2 text-[10px] font-black uppercase tracking-[0.18em] text-zinc-400">{promo.targetType} {promo.targetValue ? `• ${promo.targetValue}` : ''}</p>
-                        <p className="mt-2 text-[10px] font-black uppercase tracking-[0.18em] text-zinc-400">{promo.expiresAt ? `Until ${new Date(promo.expiresAt).toLocaleDateString()}` : 'Ongoing'}</p>
+                        <p className="mt-2 text-[10px] font-black uppercase tracking-[0.18em] text-zinc-400">{formatPromoSchedule(promo)}</p>
                       </div>
                       <div className="text-right">
                         <p className="text-sm font-black text-rose-600">{promo.discountType === 'amount' ? formatCurrency(promo.discountValue) : `${promo.discountValue}%`}</p>
-                        <p className={`mt-2 text-[10px] font-black uppercase tracking-[0.18em] ${promo.isActive === false ? 'text-zinc-400' : 'text-emerald-600'}`}>{promo.isActive === false ? 'Inactive' : 'Active'}</p>
+                        <p className={`mt-2 text-[10px] font-black uppercase tracking-[0.18em] ${status.className}`}>{status.label}</p>
                       </div>
                     </div>
                     <div className="mt-4 flex gap-3">
@@ -576,7 +621,7 @@ export default function AdminDashboard() {
                       <button onClick={() => handleDeletePromo(promo.code)} className="rounded-2xl border border-rose-200 px-4 py-3 text-[10px] font-black uppercase tracking-[0.18em] text-rose-600 transition hover:bg-rose-50">Delete</button>
                     </div>
                   </div>
-                ))}
+                );})}
               </div>
             </section>
           </div>
@@ -663,6 +708,7 @@ function OrderCard({ order, onSave }) {
   const [trackingNumber, setTrackingNumber] = useState(order.trackingNumber || '');
   const trackingEnabled = TRACKING_STATUSES.has(status);
   const refundReference = order.refundReference || order.refundId || '';
+  const shouldShowRefundReference = String(order.status || '').toUpperCase() === 'CANCELLED' || Boolean(refundReference);
 
   useEffect(() => {
     setStatus(order.status || 'PENDING');
@@ -700,10 +746,12 @@ function OrderCard({ order, onSave }) {
               <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Tracking Number</p>
               <p className="mt-2 text-sm font-black text-zinc-900">{order.trackingNumber || 'Not available yet'}</p>
             </div>
-            <div className="sm:col-span-2">
-              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Refund Reference</p>
-              <p className="mt-2 text-sm font-black text-zinc-900">{refundReference || 'Not refunded'}</p>
-            </div>
+            {shouldShowRefundReference ? (
+              <div className="sm:col-span-2">
+                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Refund Reference</p>
+                <p className="mt-2 text-sm font-black text-zinc-900">{refundReference || 'Pending'}</p>
+              </div>
+            ) : null}
           </div>
           <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Items</p>
           <div className="mt-3 space-y-2">
